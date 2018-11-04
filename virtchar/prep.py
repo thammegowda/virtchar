@@ -5,8 +5,6 @@ from argparse import ArgumentDefaultsHelpFormatter as ArgFormatter
 
 from virtchar import TranslationExperiment
 
-piece_types = ('unigram', 'bpe', 'char', 'word')
-
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="rtg.prep", description="prepare NMT experiment",
