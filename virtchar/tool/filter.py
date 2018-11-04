@@ -16,9 +16,7 @@ This script filters transcript sequence into
 
 import argparse
 import sys
-import logging as log
-
-log.basicConfig(level=log.INFO)
+from virtchar import log
 
 
 def filter_triples(inp, character, bod='<bod>'):

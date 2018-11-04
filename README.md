@@ -1,2 +1,28 @@
-# virt-friends
-Virtual Friends
+# VirtChar - A toolkit for making TV characters as chat bots
+
+
+## Requirements
+The following libraries are required
+- Pytorch - 0.4.0 or later (we are using 1.0 alpha)
+- Python 3.7
+- (see requirements.txt)
+
+
+## Datasets
+
+
+## Demos
+
+ 1. **Friends**
+   - Chandler
+   - Monica
+   (Other characters will be added later)
+
+
+## Team
+
+-
+-
+-
+
+If you have questions, send them to our team
