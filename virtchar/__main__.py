@@ -1,6 +1,6 @@
 import sys
-from rtg import log
+from virtchar import log
 
 if __name__ == '__main__':
-    log.error('please use rtg.prep, rtg.train or rtg.decode sub tasks')
+    log.error('please use virtchar.prep, virtchar.train or virtchar.decode sub tasks')
     sys.exit(1)
