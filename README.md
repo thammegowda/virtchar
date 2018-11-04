@@ -3,8 +3,9 @@
 
 ## Requirements
 The following libraries are required
-- Pytorch - 0.4.0 or later (we are using 1.0 alpha)
-- Python 3.7
+- [Pytorch](https://pytorch.org/get-started/locally/) - 0.4.0 or later (we are using 1.0 alpha)
+- [Python 3.7]()
+- [sentencepiece](https://github.com/google/sentencepiece)
 - (see requirements.txt)
 
 

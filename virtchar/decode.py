@@ -35,9 +35,6 @@ def parse_args():
     parser.add_argument("--prepared", dest="prepared", action='store_true',
                         help='Each token is a valid integer which is an index to embedding,'
                              ' so skip indexifying again')
-    parser.add_argument("-bp", '--binmt-path', type=str, default=None,
-                        choices=['E1D1', 'E2D2', 'E1D2E2D1', 'E2D2E1D2', 'E1D2', 'E2D1'],
-                        help='Sub module path inside BiNMT. applicable only when model is BiNMT')
     parser.add_argument("-it", '--interactive', action='store_true',
                         help='Open interactive shell with decoder')
     parser.add_argument("-sc", '--skip-check', action='store_true',
@@ -55,10 +52,6 @@ def main():
     gen_args = {}
 
     exp = Experiment(args.pop('work_dir'), read_only=True)
-    if exp.model_type == 'binmt':
-        if not args.get('path'):
-            Exception('--binmt-path argument is needed for BiNMT model.')
-        gen_args['path'] = args.pop('binmt_path')
 
     if not args.pop('skip_check'):  # if --skip-check is not requested
         assert exp.has_prepared(),\
