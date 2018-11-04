@@ -422,7 +422,7 @@ def __test_seq2seq_model__():
                           read_only=True, vocab_size=vocab_size)
     emb_size = 100
     model_dim = 100
-    steps = 1000
+    steps = 2000
     check_pt = 100
 
     assert 2 == Batch.bos_val
@@ -437,7 +437,7 @@ def __test_seq2seq_model__():
         log.info(f"====== REVERSE={reverse}; VOCAB={vocab_size}======")
         model, args = Seq2Seq.make_model('DummyA', 'DummyB', vocab_size, vocab_size, attention=True,
                                          emb_size=emb_size, hid_size=model_dim, n_layers=1)
-        trainer = SteppedSeq2SeqTrainer(exp=exp, model=model, lr=0.01, warmup_steps=100)
+        trainer = SteppedSeq2SeqTrainer(exp=exp, model=model, lr=0.01, warmup_steps=500)
         decr = Decoder.new(exp, model)
 
         def check_pt_callback(**args):
