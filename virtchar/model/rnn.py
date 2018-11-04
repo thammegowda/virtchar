@@ -211,65 +211,26 @@ class AttnSeqDecoder(SeqDecoder):
             return concat_output, hidden, attn_weights
 
 
-class Seq2SeqBridge(nn.Module):
-    """Vector to Vector (a slightly different setup than seq2seq
-    starts with a decoder, then an encoder (short-circuits (or skips) embedder and generator)
-    """
-
-    def __init__(self, dec: SeqDecoder, enc: SeqEncoder):
-        super().__init__()
-        self.dec = dec
-        self.enc = enc
-        self.inp_size = dec.hid_size
-        self.out_size = enc.out_size
-
-    def forward(self, enc_outs, enc_hids, max_len):
-        batch_size = len(enc_outs)
-        assert batch_size == enc_hids[0].shape[1] == enc_hids[1].shape[1]
-
-        dec_inps = tensor([[BOS_TOK_IDX]] * batch_size, dtype=torch.long)
-        dec_hids = enc_hids
-        result = torch.zeros((batch_size, max_len, self.dec.hid_size), device=device)
-        for t in range(max_len):
-            dec_outs, dec_hids, _ = self.dec(enc_outs, dec_inps, dec_hids, gen_probs=False)
-            result[:, t, :] = dec_outs
-
-        # TODO: check how hidden state flows
-        enc_outs, enc_hids = self.enc(result, [max_len] * batch_size, pre_embedded=True)
-        return enc_outs, enc_hids
-
-
 class Seq2Seq(NMTModel):
 
-    def __init__(self, enc: SeqEncoder, dec: SeqDecoder, bridge: Seq2SeqBridge = None):
+    def __init__(self, enc: SeqEncoder, dec: SeqDecoder):
         super(Seq2Seq, self).__init__()
         self.enc = enc
         self.dec = dec
-        if bridge:
-            # enc --> bridge.dec --> bridge.enc --> dec
-            assert enc.out_size == bridge.inp_size
-            assert bridge.out_size == dec.hid_size
-        else:
-            # enc --> dec
-            assert enc.out_size == dec.hid_size
-        self.bridge = bridge
+        assert enc.out_size == dec.hid_size
 
     @property
     def model_dim(self):
         return self.enc.out_size
 
-    def encode(self, x_seqs, x_lens, hids=None, max_y_len=256):
+    def encode(self, x_seqs, x_lens, hids=None):
         enc_outs, enc_hids = self.enc(x_seqs, x_lens, hids)
-        if self.bridge:
-            # used in BiNMT to make a cycle, such as Enc1 -> [[Dec2 -> Enc2]] -> Dec2
-            enc_outs, enc_hids = self.bridge(enc_outs, enc_hids, max_y_len)
         return enc_outs, enc_hids
 
     def forward(self, batch: Batch):
         assert batch.batch_first
         batch_size = len(batch)
-        enc_outs, enc_hids = self.encode(batch.x_seqs, batch.x_len, hids=None,
-                                         max_y_len=batch.max_y_len)
+        enc_outs, enc_hids = self.encode(batch.x_seqs, batch.x_len, hids=None)
 
         dec_inps = tensor([[BOS_TOK_IDX]] * batch_size, dtype=torch.long)
         dec_hids = enc_hids
