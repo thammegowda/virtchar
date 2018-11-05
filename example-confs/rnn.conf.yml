@@ -1,0 +1,29 @@
+
+prep:
+  train_dialogs: data/friends/friends.train.tok.tsv
+  valid_dialogs: data/friends/friends.dev.tok.tsv
+  finetune_dialogs: data/friends/friends.train.tok.tsv
+  vocab_text: data/friends/friends.train.tok.txt
+  pieces: bpe
+  max_types: 8000
+  max_seq_len: 80
+  no_split_toks:  # do not split these tokens
+  - Ross
+  - Rachel
+  - Monica
+  - Chandler
+  - Phoebe
+  - Joey
+  - Gunter
+  characters:
+  - <pad>       # let the zero be not assigned, because zero is a special number
+  - <unk>       # all other characters go to <unk>
+  - <scene>     # if we chose to treat event in dialog turns
+  - <event>     # if we chose to use event information in dialog turns
+  - Ross
+  - Rachel
+  - Monica
+  - Chandler
+  - Phoebe
+  - Joey
+  - Gunter
