@@ -7,13 +7,13 @@ import torch
 import random
 
 from virtchar import log, load_conf
-from virtchar.tool.dataprep import (RawRecord, ParallelSeqRecord, MonoSeqRecord,
-                                    Field, BatchIterable, LoopingIterable)
-from virtchar.utils import IO, line_count
+from virtchar.tool.dataprep import (RawRecord, DialogRecord, Field, LookupField,
+                                    BatchIterable, LoopingIterable)
+from virtchar.utils import IO
 from itertools import zip_longest
 
 
-class TranslationExperiment:
+class DialogExperiment:
 
     def __init__(self, work_dir: Union[str, Path], read_only=False,
                  config: Optional[Dict[str, Any]] = None):
@@ -26,9 +26,8 @@ class TranslationExperiment:
         self.data_dir = work_dir / 'data'
         self.model_dir = work_dir / 'models'
         self._config_file = work_dir / 'conf.yml'
-        self._shared_field_file = str(self.data_dir / 'sentpiece.shared.model')
-        self._src_field_file = str(self.data_dir / 'sentpiece.src.model')
-        self._tgt_field_file = str(self.data_dir / 'sentpiece.tgt.model')
+        self._text_field_file = self.data_dir / 'text.model'
+        self._char_field_file = self.data_dir / 'vocab.char.txt'
         self._prepared_flag = self.work_dir / '_PREPARED'
         self._trained_flag = self.work_dir / '_TRAINED'
 
@@ -46,22 +45,10 @@ class TranslationExperiment:
             config = load_conf(config)
         self.config = config if config else load_conf(self._config_file)
 
-        self.shared_field, self.src_field, self.tgt_field = [
-            Field(f) if Path(f).exists() else None
-            for f in (self._shared_field_file, self._src_field_file, self._tgt_field_file)]
-
-        # Either shared field  OR  individual  src and tgt fields
-        assert not (self.shared_field and self.src_field)
-        assert not (self.shared_field and self.tgt_field)
-        # both are set or both are unset
-        assert (self.src_field is None) == (self.tgt_field is None)
-
-        self._unsupervised = self.model_type in {'binmt'}
-        if self._unsupervised:
-            self.mono_train_src = self.data_dir / 'mono.train.src.gz'
-            self.mono_train_tgt = self.data_dir / 'mono.train.tgt.gz'
-            self.mono_valid_src = self.data_dir / 'mono.valid.src.gz'
-            self.mono_valid_tgt = self.data_dir / 'mono.valid.tgt.gz'
+        self.text_field = Field(str(self._text_field_file))\
+            if self._text_field_file.exists() else None
+        self.char_field = LookupField(str(self._char_field_file)) \
+            if self._char_field_file.exists() else None
 
     def store_config(self):
         with IO.writer(self._config_file) as fp:
@@ -82,8 +69,8 @@ class TranslationExperiment:
         return self._trained_flag.exists()
 
     @staticmethod
-    def write_tsv(records: Iterator[ParallelSeqRecord], path: Union[str, Path]):
-        seqs = ((' '.join(map(str, x)), ' '.join(map(str, y))) for x, y in records)
+    def write_tsv(records: Iterator[DialogRecord], path: Union[str, Path]):
+        seqs = ((str(x), ' '.join(map(str, y))) for x, y in records)
         lines = (f'{x}\t{y}\n' for x, y in seqs)
         log.info(f"Storing data at {path}")
         with IO.writer(path) as f:
@@ -91,78 +78,64 @@ class TranslationExperiment:
                 f.write(line)
 
     @staticmethod
-    def write_mono_lines(records: Iterator[MonoSeqRecord], path: Union[str, Path]):
-        lines = (' '.join(map(str, rec)) + '\n' for rec in records)
-        log.info(f"Storing data at {path}")
-        with IO.writer(path) as f:
-            for line in lines:
-                f.write(line)
-
-    @staticmethod
-    def read_raw_lines(src_path: Union[str, Path], tgt_path: Union[str, Path]) \
-            -> Iterator[RawRecord]:
-        with IO.reader(src_path) as src_lines, IO.reader(tgt_path) as tgt_lines:
-            # if you get an exception here --> files have un equal number of lines
-            recs = ((src.strip(), tgt.strip()) for src, tgt in zip_longest(src_lines, tgt_lines))
-            recs = ((src, tgt) for src, tgt in recs if src and tgt)
+    def read_raw_lines(dialog_path: Union[str, Path]) -> Iterator[RawRecord]:
+        with IO.reader(dialog_path) as lines:
+            recs = (line.split("\t")[-2:] for line in lines)
+            recs = ((char.strip(), dialog.strip()) for char, dialog in recs)
+            recs = ((char, dialog) for char, dialog in recs if char and dialog)
             yield from recs
 
-    def read_raw_data(self, src_path: Union[str, Path], tgt_path: Union[str, Path],
-                      truncate: bool, src_len: int, tgt_len: int, tokenizer) \
-            -> Iterator[ParallelSeqRecord]:
-        recs = self.read_raw_lines(src_path, tgt_path)
-        recs = ((tokenizer(x), tokenizer(y)) for x, y in recs)
-        if truncate:
-            recs = ((src[:src_len], tgt[:tgt_len]) for src, tgt in recs)
-        else:  # Filter out longer sentences
-            recs = ((src, tgt) for src, tgt in recs if len(src) <= src_len and len(tgt) <= tgt_len)
+    @staticmethod
+    def write_lines(path: Union[str, Path], lines):
+        count = 0
+        with IO.writer(path) as out:
+            for line in lines:
+                count += 1
+                out.write(line.strip())
+                out.write("\n")
+            log.info(f"Wrote {count} lines to {path}")
+
+    def read_raw_data(self, dialog_path: Union[str, Path], max_seq_len: int,
+                      text_tokenizer, char_id_mapper) \
+            -> Iterator[DialogRecord]:
+        recs = self.read_raw_lines(dialog_path)
+        recs = ((char_id_mapper(char), text_tokenizer(dialog)) for char, dialog in recs)
+        recs = ((char, dialog[:max_seq_len]) for char, dialog in recs)
         return recs
 
-    @staticmethod
-    def read_mono_raw_data(path: Union[str, Path], truncate: bool, max_len: int, tokenizer):
-        with IO.reader(path) as lines:
-            recs = (tokenizer(line.strip()) for line in lines if line.strip())
-            if truncate:
-                recs = (rec[:max_len] for rec in recs)
-            else:  # Filter out longer sentences
-                recs = (rec for rec in recs if 0 < len(rec) <= max_len)
-            yield from recs
-
     def pre_process_parallel(self, args: Dict[str, Any]):
-        assert args['shared_vocab']  # TODO support individual vocab types
-        files = [args['train_src'], args['train_tgt']]
-        for val in [args.get('mono_src'), args.get('mono_tgt')]:
-            if val:
-                files.extend(val)
 
-        # check if files are parallel
-        assert line_count(args['train_src']) == line_count(args['train_tgt'])
-        assert line_count(args['valid_src']) == line_count(args['valid_tgt'])
+        # character names vocabulary
+        assert 'characters' in args and type(args['characters']) is list
+        self.write_lines(self._char_field_file, args['characters'])
+        self.char_field = LookupField(self._char_field_file)
 
+        # Dialog Text vocabulary
+        files = [args['vocab_text']]
         no_split_toks = args.get('no_split_toks')
-        self.shared_field = Field.train(args['pieces'], args['max_types'],
-                                        self._shared_field_file, files,
-                                        no_split_toks=no_split_toks)
+        self.text_field = Field.train(args['pieces'], args['max_types'],
+                                      str(self._text_field_file), files,
+                                      no_split_toks=no_split_toks)
 
         # create Piece IDs
-        train_recs = self.read_raw_data(args['train_src'], args['train_tgt'], args['truncate'],
-                                        args['src_len'], args['tgt_len'],
-                                        tokenizer=self.src_vocab.encode_as_ids)
+        train_recs = self.read_raw_data(args['train_dialogs'], args['max_seq_len'],
+                                        text_tokenizer=self.text_field.encode_as_ids,
+                                        char_id_mapper=self.char_field.encode_as_id)
         self.write_tsv(train_recs, self.train_file)
-        val_recs = self.read_raw_data(args['valid_src'], args['valid_tgt'], args['truncate'],
-                                      args['src_len'], args['tgt_len'],
-                                      tokenizer=self.tgt_vocab.encode_as_ids)
+        val_recs = self.read_raw_data(args['valid_dialogs'], args['max_seq_len'],
+                                      text_tokenizer=self.text_field.encode_as_ids,
+                                      char_id_mapper=self.char_field.encode_as_id)
         self.write_tsv(val_recs, self.valid_file)
 
         if args.get('text_files'):
             # Redo again as plain text files
-            train_recs = self.read_raw_data(args['train_src'], args['train_tgt'], args['truncate'],
-                                            args['src_len'], args['tgt_len'],
-                                            tokenizer=self.src_vocab.tokenize)
+            train_recs = self.read_raw_data(args['train_dialogs'], args['max_seq_len'],
+                                            text_tokenizer=self.text_field.tokenize,
+                                            char_id_mapper=self.char_field.remap)
             self.write_tsv(train_recs, str(self.train_file).replace('.tsv', '.pieces.tsv'))
-            val_recs = self.read_raw_data(args['valid_src'], args['valid_tgt'], args['truncate'],
-                                          args['src_len'], args['tgt_len'],
-                                          tokenizer=self.tgt_vocab.tokenize)
+            val_recs = self.read_raw_data(args['valid_dialogs'], args['max_seq_len'],
+                                          text_tokenizer=self.text_field.tokenize,
+                                          char_id_mapper=self.char_field.remap)
             self.write_tsv(val_recs, str(self.valid_file).replace('.tsv', '.pieces.tsv'))
 
         if args.get("finetune_src") or args.get("finetune_tgt"):
@@ -170,47 +143,15 @@ class TranslationExperiment:
 
         # get samples from validation set
         n_samples = args.get('num_samples', 5)
-        val_raw_recs = self.read_raw_data(args['valid_src'], args['valid_tgt'], args['truncate'],
-                                          args['src_len'], args['tgt_len'],
-                                          tokenizer=lambda line: line.strip().split())
+
+        val_raw_recs = self.read_raw_data(args['valid_dialogs'],
+                                          args['max_seq_len'],
+                                          text_tokenizer=lambda line: line.strip().split(),
+                                          char_id_mapper=lambda line: line.strip())
         val_raw_recs = list(val_raw_recs)
         random.shuffle(val_raw_recs)
         samples = val_raw_recs[:n_samples]
         self.write_tsv(samples, self.samples_file)
-
-    def pre_process_mono(self, args):
-        no_split_toks = args.get('no_split_toks')
-        if args.get('shared_vocab'):
-            files = [args['mono_train_src'], args['mono_train_tgt']]
-            self.shared_field = Field.train(args['pieces'],
-                                            args['max_types'],
-                                            self._shared_field_file, files,
-                                            no_split_toks=no_split_toks)
-        else:
-            self.src_field = Field.train(args['pieces'], args['max_src_types'],
-                                         self._src_field_file, [args['mono_train_src']],
-                                         no_split_toks=no_split_toks)
-
-            self.tgt_field = Field.train(args['pieces'], args['max_tgt_types'],
-                                         self._tgt_field_file, [args['mono_train_tgt']],
-                                         no_split_toks=no_split_toks)
-
-        def _prep_file(raw_file, out_file, do_truncate, max_len, field: Field):
-            recs = self.read_mono_raw_data(raw_file, do_truncate, max_len, field.encode_as_ids)
-            self.write_mono_lines(recs, out_file)
-            if args.get('text_files'):
-                recs = self.read_mono_raw_data(raw_file, do_truncate, max_len, field.tokenize)
-                self.write_mono_lines(recs, str(out_file).replace('.tsv', '.pieces.tsv'))
-
-        _prep_file(args['mono_train_src'], self.mono_train_src, args['truncate'], args['src_len'],
-                   self.src_vocab)
-        _prep_file(args['mono_train_tgt'], self.mono_train_tgt, args['truncate'], args['tgt_len'],
-                   self.tgt_vocab)
-
-        _prep_file(args['mono_valid_src'], self.mono_valid_src, args['truncate'], args['src_len'],
-                   self.src_vocab)
-        _prep_file(args['mono_valid_tgt'], self.mono_valid_tgt, args['truncate'], args['tgt_len'],
-                   self.tgt_vocab)
 
     def pre_process_finetune(self, args=None):
         """
@@ -220,27 +161,25 @@ class TranslationExperiment:
         """
         log.info("Going to prep fine tune files")
         args = args if args else self.config['prep']
-        assert 'finetune_src' in args
-        assert 'finetune_tgt' in args
+        assert 'finetune_dialogs' in args
         # create Piece IDs
-        finetune_recs = self.read_raw_data(args['finetune_src'], args['finetune_tgt'],
-                                           args['truncate'], args['src_len'], args['tgt_len'],
-                                           tokenizer=self.src_vocab.encode_as_ids)
+        finetune_recs = self.read_raw_data(args['finetune_dialogs'],
+                                           args['max_seq_len'],
+                                           text_tokenizer=self.text_field.encode_as_ids,
+                                           char_id_mapper=self.char_field.encode_as_id)
         self.write_tsv(finetune_recs, self.finetune_file)
 
         if args.get('text_files'):
             # Redo again as plain text files
-            finetune_recs = self.read_raw_data(args['finetune_src'], args['finetune_tgt'],
-                                               args['truncate'], args['src_len'], args['tgt_len'],
-                                               tokenizer=self.src_vocab.tokenize)
+            finetune_recs = self.read_raw_data(args['finetune_dialogs'],
+                                               args['max_seq_len'],
+                                               text_tokenizer=self.text_field.tokenize,
+                                               char_id_mapper=self.char_field.remap)
             self.write_tsv(finetune_recs, str(self.finetune_file).replace('.tsv', '.pieces.tsv'))
 
     def pre_process(self, args=None):
         args = args if args else self.config['prep']
-        if self._unsupervised:
-            self.pre_process_mono(args)
-        else:
-            self.pre_process_parallel(args)
+        self.pre_process_parallel(args)
 
         # update state on disk
         self.persist_state()
@@ -252,15 +191,15 @@ class TranslationExperiment:
         if 'model_args' not in self.config:
             self.config['model_args'] = {}
         args = self.config['model_args']
-        args['src_vocab'] = len(self.src_vocab) if self.src_vocab else 0
-        args['tgt_vocab'] = len(self.tgt_vocab) if self.tgt_vocab else 0
+        args['text_vocab'] = len(self.text_field) if self.text_field else 0
+        args['char_vocab'] = len(self.char_field) if self.char_field else 0
         self.config['updated_at'] = datetime.now().isoformat()
         self.store_config()
 
-    def store_model(self, epoch: int, model, train_score: float, val_score: float, keep: int):
+    def store_model(self, step: int, model, train_score: float, val_score: float, keep: int):
         """
         saves model to a given path
-        :param epoch: epoch number of model
+        :param step: step number of training
         :param model: model object itself
         :param train_score: score of model on training split
         :param val_score: score of model on validation split
@@ -271,9 +210,9 @@ class TranslationExperiment:
         if self.read_only:
             log.warning("Ignoring the store request; experiment is readonly")
             return
-        name = f'model_{epoch:03d}_{train_score:.6f}_{val_score:.6f}.pkl'
+        name = f'model_{step:05d}_{train_score:.6f}_{val_score:.6f}.pkl'
         path = self.model_dir / name
-        log.info(f"Saving epoch {epoch} to {path}")
+        log.info(f"Saving epoch {step} to {path}")
         torch.save(model, str(path))
 
         for bad_model in self.list_models(sort='total_score', desc=False)[keep:]:
@@ -281,7 +220,7 @@ class TranslationExperiment:
             os.remove(str(bad_model))
 
         with IO.writer(os.path.join(self.model_dir, 'scores.tsv'), append=True) as f:
-            cols = [str(epoch), datetime.now().isoformat(), name, f'{train_score:g}',
+            cols = [str(step), datetime.now().isoformat(), name, f'{train_score:g}',
                     f'{val_score:g}']
             f.write('\t'.join(cols) + '\n')
 
@@ -381,14 +320,6 @@ class TranslationExperiment:
         """
         name, args = optim_args
         self.config['optim'] = {'name': name, 'args': args}
-
-    @property
-    def src_vocab(self) -> Field:
-        return self.shared_field if self.shared_field is not None else self.src_field
-
-    @property
-    def tgt_vocab(self):
-        return self.shared_field if self.shared_field is not None else self.tgt_field
 
     def get_train_data(self, batch_size: int, steps: int = 0, sort_dec=True, batch_first=True,
                        shuffle=False, copy_xy=False, fine_tune=False):

@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from tqdm import tqdm
 
-from virtchar import device, log, my_tensor as tensor, TranslationExperiment
+from virtchar import device, log, my_tensor as tensor, DialogExperiment
 from virtchar.tool.dataprep import Batch, BatchIterable
 from virtchar.model import NMTModel
 from virtchar.model.trainer import TrainerState, SteppedTrainer
@@ -411,7 +411,7 @@ class MultiGPULossFunction(SimpleLossFunction):
 
 class T2TTrainer(SteppedTrainer):
 
-    def __init__(self, exp: TranslationExperiment,
+    def __init__(self, exp: DialogExperiment,
                  model: Optional[T2TModel] = None,
                  optim: str = 'ADAM',
                  **optim_args):

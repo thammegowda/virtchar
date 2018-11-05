@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 from tqdm import tqdm
 
-from virtchar import log, TranslationExperiment as Experiment
+from virtchar import log, DialogExperiment as Experiment
 from virtchar import my_tensor as tensor, device
 from virtchar.tool.dataprep import PAD_TOK_IDX, BOS_TOK_IDX, Batch, BatchIterable
 from virtchar.model import NMTModel

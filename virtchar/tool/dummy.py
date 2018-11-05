@@ -2,7 +2,7 @@
 # Generates dummy data for testing
 from virtchar.tool.dataprep import Batch, Example, LoopingIterable
 import argparse
-from virtchar import log, TranslationExperiment as Experiment
+from virtchar import log, DialogExperiment as Experiment
 from virtchar.utils import IO
 
 import numpy as np

@@ -48,7 +48,7 @@ def load_conf(inp):
 
 from virtchar.tool import dataprep
 from virtchar.tool.dataprep import BatchIterable, Batch
-from virtchar.tool.exp import TranslationExperiment
+from virtchar.tool.exp import DialogExperiment
 from virtchar.model import t2t
 
 

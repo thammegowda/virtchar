@@ -3,7 +3,7 @@
 import argparse
 from argparse import ArgumentDefaultsHelpFormatter as ArgFormatter
 
-from virtchar import TranslationExperiment as Experiment, log
+from virtchar import DialogExperiment as Experiment, log
 from virtchar.model.t2t import T2TTrainer
 from virtchar.model.rnn import SteppedSeq2SeqTrainer
 from virtchar.utils import log_tensor_sizes, Optims

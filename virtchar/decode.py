@@ -4,7 +4,7 @@ import sys
 from argparse import ArgumentDefaultsHelpFormatter as ArgFormatter
 import torch
 
-from virtchar import TranslationExperiment as Experiment, log
+from virtchar import DialogExperiment as Experiment, log
 from virtchar.use.decoder import Decoder, ReloadEvent
 
 

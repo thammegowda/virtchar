@@ -7,7 +7,7 @@ from typing import List, Tuple, Type, Dict, Any, Optional
 import torch
 from torch import nn as nn
 
-from virtchar import TranslationExperiment as Experiment
+from virtchar import DialogExperiment as Experiment
 from virtchar import log, device, my_tensor as tensor, debug_mode
 from virtchar.model.rnn import Seq2Seq
 from virtchar.tool.dataprep import PAD_TOK, BOS_TOK, EOS_TOK, subsequent_mask

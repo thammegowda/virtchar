@@ -4,7 +4,7 @@
 # Created: 10/17/18
 import torch
 import torch.nn as nn
-from virtchar import log, TranslationExperiment as Experiment, device, BatchIterable
+from virtchar import log, DialogExperiment as Experiment, device, BatchIterable
 from virtchar.model import NMTModel
 from virtchar.utils import Optims, IO
 
@@ -109,7 +109,7 @@ class NoOpSummaryWriter(SummaryWriter):
     """
     A No-Op TensorBordX for tests and such experiments that doesnt want to leave
     footprints on file system.
-    Note: that this doesnt not extend all methods of SummaryWriter
+    Note: that this does not extend all methods of SummaryWriter
     """
 
     def __init__(self, *args, **kwargs):

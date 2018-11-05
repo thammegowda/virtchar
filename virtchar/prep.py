@@ -3,7 +3,7 @@
 import argparse
 from argparse import ArgumentDefaultsHelpFormatter as ArgFormatter
 
-from virtchar import TranslationExperiment
+from virtchar import DialogExperiment
 
 
 def parse_args():
@@ -16,7 +16,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    exp = TranslationExperiment(args.work_dir, config=args.conf_file)
+    exp = DialogExperiment(args.work_dir, config=args.conf_file)
     return exp.pre_process()
 
 

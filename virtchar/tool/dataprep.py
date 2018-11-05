@@ -4,11 +4,13 @@ import torch
 from virtchar import log
 from virtchar import my_tensor as tensor, device
 from virtchar.utils import IO
+from typing import Mapping, List, Union
 import math
 import random
 from collections import namedtuple
 from sentencepiece import SentencePieceProcessor, SentencePieceTrainer
 from pathlib import Path
+from dataclasses import dataclass
 
 PAD_TOK = '<pad>', 0
 UNK_TOK = '<unk>', 1
@@ -29,6 +31,10 @@ TokRawRecord = Tuple[List[str], List[str]]
 MonoSeqRecord = List[Union[int, str]]
 ParallelSeqRecord = Tuple[MonoSeqRecord, MonoSeqRecord]
 TokStream = Union[Iterator[Iterator[str]], Iterator[str]]
+
+CharacterField = Union[int, str]
+TextField = List[Union[int, str]]
+DialogRecord = Tuple[CharacterField, TextField]
 
 
 class Field(SentencePieceProcessor):
@@ -91,6 +97,27 @@ class Field(SentencePieceProcessor):
         if not model_path.endswith('.model'):
             model_path += '.model'
         return Field(model_path)
+
+
+class LookupField:
+
+    def __init__(self, vocab_file: Union[str, Path], unk_tok: str='<unk>'):
+        self.int_to_str: List[str] = read_lines(vocab_file)
+        self.str_to_int: Mapping[str, int] = {tok: idx for idx, tok in enumerate(self.int_to_str)}
+        assert unk_tok in self.str_to_int
+        self.unk_tok: str = unk_tok
+        self.unk_id: int = self.str_to_int[unk_tok]
+        assert len(self.int_to_str) == len(self.str_to_int)
+        self._len = len(self.int_to_str)
+
+    def encode_as_id(self, text: str) -> int:
+        return self.str_to_int.get(text, self.unk_id)
+
+    def remap(self, text: str) -> str:
+        return text if text in self.str_to_int else self.unk_tok
+
+    def __len__(self):
+        return self._len
 
 
 Example = namedtuple('Example', ['x', 'y'])
@@ -161,6 +188,13 @@ def read_tsv(path: str):
     assert os.path.exists(path)
     with IO.reader(path) as f:
         yield from (line.split('\t') for line in f)
+
+
+def read_lines(path: Union[str, Path]):
+    with IO.reader(path) as f:
+        lines = f.readlines()
+        lines = [l.strip() for l in lines]
+        return lines
 
 
 def tokenize(strs: List[str]) -> List[List[str]]:
