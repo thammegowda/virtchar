@@ -5,7 +5,7 @@ from argparse import ArgumentDefaultsHelpFormatter as ArgFormatter
 
 from virtchar import DialogExperiment as Experiment, log
 from virtchar.model.t2t import T2TTrainer
-from virtchar.model.rnn import SteppedSeq2SeqTrainer
+from virtchar.model.rnn import SteppedHREDTrainer
 from virtchar.utils import log_tensor_sizes, Optims
 
 
@@ -58,7 +58,7 @@ def main():
 
     trainer = {
         't2t': T2TTrainer,
-        'seq2seq': SteppedSeq2SeqTrainer,
+        'HRED': SteppedHREDTrainer,
     }[exp.model_type](exp, optim=args.pop('optim'), **optim_args)
     try:
         trainer.train(**args)

@@ -97,14 +97,7 @@ class IO:
         self.errors = errors if errors else 'replace'
 
     def __enter__(self):
-
-        if self.path.name.endswith(".gz"):   # gzip mode
-            self.fd = gzip.open(self.path, self.mode, encoding=self.encoding, errors=self.errors)
-        else:
-            if 'b' in self.mode:  # binary mode doesnt take encoding or errors
-                self.fd = self.path.open(self.mode)
-            else:
-                self.fd = self.path.open(self.mode, encoding=self.encoding, errors=self.errors)
+        self.fd = self.open()
         return self.fd
 
     def __exit__(self, _type, value, traceback):
@@ -117,3 +110,16 @@ class IO:
     @classmethod
     def writer(cls, path, text=True, append=False):
         return cls(path, ('a' if append else 'w') + ('t' if text else 'b'))
+
+    def open(self):
+        if self.path.name.endswith(".gz"):   # gzip mode
+            return gzip.open(self.path, self.mode, encoding=self.encoding, errors=self.errors)
+        else:
+            if 'b' in self.mode:  # binary mode doesnt take encoding or errors
+                return self.path.open(self.mode)
+            else:
+                return self.path.open(self.mode, encoding=self.encoding, errors=self.errors)
+
+    def close(self):
+        if self.fd:
+            self.fd.close()

@@ -3,7 +3,7 @@
 import copy
 import math
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Iterator
 
 import torch
 import torch.nn as nn
@@ -12,9 +12,11 @@ from torch.autograd import Variable
 from tqdm import tqdm
 
 from virtchar import device, log, my_tensor as tensor, DialogExperiment
-from virtchar.tool.dataprep import Batch, BatchIterable
-from virtchar.model import NMTModel
+from virtchar.model import DialogModel
 from virtchar.model.trainer import TrainerState, SteppedTrainer
+from virtchar.tool.dataprep import DialogMiniBatch
+from virtchar.tool.dataprep import PAD_TOK_IDX as pad_value
+
 
 
 def clones(module, N):
@@ -99,7 +101,7 @@ class Decoder(nn.Module):
         return self.norm(x)
 
 
-class T2TModel(NMTModel):
+class T2TModel(DialogModel):
     """
     A standard Encoder-Decoder architecture. Base for this and many
     other models.
@@ -297,8 +299,6 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-
-
 class LabelSmoothing(nn.Module):
     """
     Label smoothing
@@ -426,13 +426,13 @@ class T2TTrainer(SteppedTrainer):
         generator = self.model.generator
 
         criterion = LabelSmoothing(vocab_size=generator.vocab,
-                                   padding_idx=Batch.pad_value,
+                                   padding_idx=pad_value,
                                    smoothing=self._smoothing)
 
         self.loss_func = MultiGPULossFunction(generator, criterion, devices=device_ids,
                                               opt=self.opt)
 
-    def run_valid_epoch(self, data_iter: BatchIterable):
+    def run_valid_epoch(self, data_iter: Iterator[DialogMiniBatch]):
         """
         :param data_iter: data iterator
         :return: loss value

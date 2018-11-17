@@ -4,13 +4,14 @@
 # Created: 10/17/18
 import torch
 import torch.nn as nn
-from virtchar import log, DialogExperiment as Experiment, device, BatchIterable
-from virtchar.model import NMTModel
+from virtchar import log, DialogExperiment as Experiment, device
+from virtchar.model import DialogModel
 from virtchar.utils import Optims, IO
+from virtchar.tool.dataprep import DialogMiniBatch, RawDialogReader
 
 
 from abc import abstractmethod
-from typing import Optional, Callable
+from typing import Optional, Callable, Iterator
 from dataclasses import dataclass
 import time
 from tensorboardX import SummaryWriter
@@ -68,7 +69,7 @@ class TrainerState:
     A dataclass for storing any running stats the trainer needs to keep track during training
     """
 
-    model: NMTModel
+    model: DialogModel
     check_point: int
     total_toks: int = 0
     total_loss: float = 0.0
@@ -76,7 +77,7 @@ class TrainerState:
     start: float = time.time()
 
     def running_loss(self):
-        return self.total_loss / self.total_toks if self.total_toks != 0 else float('inf')
+        return self.total_loss / self.total_toks if self.total_toks else float('inf')
 
     def reset(self):
         loss = self.running_loss()
@@ -92,14 +93,15 @@ class TrainerState:
 
     def step(self, toks, loss):
         self.steps += 1
-        self.total_toks += toks
+        self.total_toks += toks.item()
         self.total_loss += loss
         return self.progress_bar_msg(), self.is_check_point()
 
     def progress_bar_msg(self):
         elapsed = time.time() - self.start
-        return f'Loss:{self.total_loss / self.total_toks:.4f},' \
-            f' {int(self.total_toks / elapsed)}toks/s'
+        toks = self.total_toks
+        assert toks > 0.0 and elapsed > 0.0
+        return f'Loss:{self.total_loss/toks:.4f}, {int(toks / elapsed)}toks/s'
 
     def is_check_point(self):
         return self.steps == self.check_point
@@ -134,7 +136,7 @@ class SteppedTrainer:
     """
 
     def __init__(self, exp: Experiment,
-                 model: Optional[NMTModel] = None,
+                 model: Optional[DialogModel] = None,
                  model_factory: Optional[Callable] = None,
                  optim: str = 'ADAM',
                  **optim_args):
@@ -184,14 +186,8 @@ class SteppedTrainer:
         if not self.exp.read_only:
             self.exp.persist_state()
         self.samples = None
-        if exp.samples_file.exists():
-            with IO.reader(exp.samples_file) as f:
-                self.samples = [line.strip().split('\t') for line in f]
-                log.info(f"Found {len(self.samples)} sample records")
-                if self.start_step == 0:
-                    for samp_num, sample in enumerate(self.samples):
-                        self.tbd.add_text(f"samples/{samp_num}", " || ".join(sample), 0)
-
+        if self.exp.samples_file.exists():
+            self.samples_raw = list(RawDialogReader(self.exp.samples_file))
             from virtchar.use.decoder import Decoder
             self.decoder = Decoder.new(self.exp, self.model)
 
@@ -206,16 +202,19 @@ class SteppedTrainer:
         if not self.samples:
             log.info("No samples are chosen by the experiment")
             return
-        for i, (line, ref) in enumerate(self.samples):
+        log.error("show_samples not implemented")
+        return
+        # FIXME:
+        for i, (raw_dialog) in enumerate(self.samples_raw):
             step_num = self.opt.curr_step
-            result = self.decoder.decode_sentence(line, beam_size=beam_size, num_hyp=num_hyp,
-                                                  max_len=max_len)
+
+            result = self.decoder.gene(line, beam_size=beam_size, num_hyp=num_hyp, max_len=max_len)
             outs = [f"hyp{j}: {score:.3f} :: {out}" for j, (score, out) in enumerate(result)]
             self.tbd.add_text(f'sample/{i}', " || ".join(outs), step_num)
             outs = '\n'.join(outs)
             log.info(f"==={i}===\nSRC:{line}\nREF:{ref}\n{outs}")
 
-    def make_check_point(self, val_data: BatchIterable, train_loss: float, keep_models: int):
+    def make_check_point(self, val_data: Iterator[DialogMiniBatch], train_loss: float, keep_models: int):
         """
         Check point the model
         :param val_data: validation data to obtain validation score
@@ -237,7 +236,7 @@ class SteppedTrainer:
                              val_score=val_loss, keep=keep_models)
 
     @abstractmethod
-    def run_valid_epoch(self, data_iter: BatchIterable) -> float:
+    def run_valid_epoch(self, data_iter: Iterator[DialogMiniBatch]) -> float:
         """
         Run a validation epoch
         :param data_iter: data iterator, either training or validation

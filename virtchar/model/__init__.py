@@ -3,11 +3,11 @@
 # Author: Thamme Gowda [tg (at) isi (dot) edu] 
 # Created: 11/3/18
 
-from abc import ABCMeta, abstractmethod
+from abc import abstractmethod
 import torch.nn as nn
 
 
-class NMTModel(nn.Module):
+class DialogModel(nn.Module):
     """"
     base class for all Sequence to sequence (NMT) models
     """

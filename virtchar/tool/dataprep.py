@@ -4,13 +4,12 @@ import torch
 from virtchar import log
 from virtchar import my_tensor as tensor, device
 from virtchar.utils import IO
-from typing import Mapping, List, Union
-import math
-import random
-from collections import namedtuple
+from typing import Mapping, List, Union, Set, TextIO
 from sentencepiece import SentencePieceProcessor, SentencePieceTrainer
 from pathlib import Path
-from dataclasses import dataclass
+import sys
+import copy
+from dataclasses import dataclass, field
 
 PAD_TOK = '<pad>', 0
 UNK_TOK = '<unk>', 1
@@ -22,9 +21,7 @@ EOS_TOK_IDX = EOS_TOK[1]
 PAD_TOK_IDX = PAD_TOK[1]
 UNK_TOK_IDX = UNK_TOK[1]
 
-
 RESERVED_TOKS = [PAD_TOK, UNK_TOK, BOS_TOK, EOS_TOK]
-
 
 RawRecord = Tuple[str, str]
 TokRawRecord = Tuple[List[str], List[str]]
@@ -74,7 +71,7 @@ class Field(SentencePieceProcessor):
 
     @staticmethod
     def train(model_type: str, vocab_size: int, model_path: str, files: Iterator[str],
-              no_split_toks: Optional[List[str]]=None):
+              no_split_toks: Optional[List[str]] = None):
         """
         Train Sentence Piece Model
         :param model_type: sentence piece model type: {unigram, BPE, word, char}
@@ -85,7 +82,7 @@ class Field(SentencePieceProcessor):
         :return:
         """
         model_prefix = model_path.replace('.model', '')
-        files = set(files)    # remove duplicates
+        files = set(files)  # remove duplicates
         arg = f"--input={','.join(files)} --vocab_size={vocab_size} --model_prefix={model_prefix}" \
               f" --model_type={model_type} --pad_id={PAD_TOK[1]} --bos_id={BOS_TOK[1]}" \
               f" --eos_id={EOS_TOK[1]} --unk_id={UNK_TOK[1]} --hard_vocab_limit=false"
@@ -101,10 +98,11 @@ class Field(SentencePieceProcessor):
 
 class LookupField:
 
-    def __init__(self, vocab_file: Union[str, Path], unk_tok: str='<unk>'):
+    def __init__(self, vocab_file: Union[str, Path], unk_tok: str = '<unk>', pad_tok='<pad>'):
         self.int_to_str: List[str] = read_lines(vocab_file)
         self.str_to_int: Mapping[str, int] = {tok: idx for idx, tok in enumerate(self.int_to_str)}
         assert unk_tok in self.str_to_int
+        assert pad_tok in self.str_to_int
         self.unk_tok: str = unk_tok
         self.unk_id: int = self.str_to_int[unk_tok]
         assert len(self.int_to_str) == len(self.str_to_int)
@@ -116,72 +114,540 @@ class LookupField:
     def remap(self, text: str) -> str:
         return text if text in self.str_to_int else self.unk_tok
 
+    def __contains__(self, item):
+        return item in self.str_to_int
+
+    def __getitem__(self, item):
+        if type(item) is int:
+            return self.int_to_str[item]
+        elif type(item) is str:
+            return self.str_to_int[item]
+        else:
+            raise Exception()
+
     def __len__(self):
         return self._len
 
 
-Example = namedtuple('Example', ['x', 'y'])
 """
-An object of this class holds an example in sequence to sequence dataset
+Terminology:
+  - Utterance: Something the character says. Includes character's id and the text 
+  - Chat: A sequence of utterances as context and the response utterance. 
+         This is made up for feeding into our neural model. We control the chat context size.
+  - Dialog: A bigger chat, the one that happened in the story. We don't control how big this can go.
+      We make several Chat s out of Dialog
+  - DialogReader: An utility for reading Dialogs from a text file
+  - DialogMiniBatch: A batch of Chat s that we make to take full advantage of GPUs
+     since GPUs are great for batched linear algebra ops
+
 """
 
 
-class TSVData:
+# if eq=False, id based hashing will be used
+@dataclass(eq=False)
+class Utterance:
+    char: Union[int, str]  # the character or speaker who said this
+    text: Union[List[str], List[int]]  # the text content
+    uid: Optional[str] = None  # In case you want to identify this by referencing to ext corpus
 
-    def __init__(self, path: Union[str, Path], in_mem=False, shuffle=False, longest_first=True):
-        """
-        :param path: path to TSV file have parallel sequences
-        :param in_mem: hold data in memory instead of reading from file for subsequent pass.
-         Don't use in_mem for large data_sets.
-        :param shuffle: shuffle data between the reads
-        :param longest_first: On the first read, get the longest sequence first by sorting by length
-        """
-        self.path = path
-        self.in_mem = in_mem or shuffle or longest_first
-        self.longest_first = longest_first
-        self.shuffle = shuffle
-        self.mem = list(self.read_all()) if self.in_mem else None
-        self._len = len(self.mem) if self.in_mem else self._line_count(path)
-        self.read_counter = 0
+    def __len__(self):
+        return len(self.text)
 
-    @staticmethod
-    def _line_count(path):
-        log.debug(f"Counting lines in {path}")
-        with open(path) as f:
-            count = 0
-            for _ in f:
-                if f:
+    @property
+    def is_raw(self):
+        assert type(self.char) == type(self.text[0]) == type(self.text[-1]) # Just a shallow check
+        return type(self.char) is str
+
+
+@dataclass
+class ChatRecIdx:
+    # index of ChatRec
+    """
+    The integers here are indices . You cannot interpret these without a List[Utterance]
+    """
+    context: List[int]
+    resp: int
+
+    def __len__(self):
+        return len(self.context)
+
+
+@dataclass
+class ChatRec:
+    context: List[Utterance]
+    response: Utterance
+
+    def as_dialog_mini_batch(self):
+        """
+        Convert this ChatRec to DialogMiniBatch
+        :return:
+        """
+        chat_idx = ChatRecIdx(list(range(len(self.context))), len(self.context))
+        utters = self.context + [self.response]
+        raw_batch = DialogMiniBatchRaw(utters, [chat_idx])
+        raw_batch.sort_desc(add_eos=True)
+        return DialogMiniBatch(raw_batch)
+
+
+@dataclass()
+class Dialog:
+    chat: List[Utterance] = field(default_factory=list)
+
+    def add_chat(self, char: Union[int, str], seq: Union[List[int], List[str]]):
+        self.chat.append(Utterance(char, seq))
+
+    def __len__(self):
+        return len(self.chat)
+
+    def __iter__(self):
+        return self.chat
+
+    def as_mini_chats(self, min_ctx: int, max_ctx: int):
+        assert 0 < min_ctx <= max_ctx
+
+        for idx in range(len(self)):
+            start = max(0, idx - max_ctx)
+            ctx = self.chat[start: idx]  # until this idx
+            while len(ctx) >= min_ctx:
+                # shallow copy.copy is intentional,
+                #  copy.deepcopy mess the id based hashing, so don't do that
+                yield ChatRec(copy.copy(ctx), self.chat[idx])
+                # Slide the window, by removing the left most
+                ctx.pop(0)
+
+    def as_test_chats(self, min_ctx: int, max_ctx: int, test_chars: Set):
+        """
+        :param min_ctx: minimum context window
+        :param max_ctx: maximum context window
+        :param test_chars: only return chats that have responses from these characters
+        :return: an iterator of ChatRec
+        """
+        assert 0 < min_ctx <= max_ctx
+        if len(self) <= min_ctx:
+            yield from []  # we need at least min_ctx + 1 utterances
+
+        for right in range(min_ctx, len(self)-1):
+            left = max(0, right - max_ctx)
+            ctx = self.chat[left: right]
+            resp = self.chat[right+1]
+            if resp.char in test_chars:
+                yield ChatRec(ctx, resp)
+
+
+class RawDialogReader:
+    """
+    This one reads Raw text.
+    For integer ids, see DialogReader
+    """
+
+    def __init__(self, inp: Union[str, Path, TextIO, Iterator[str]],
+                 reset_on_scene=True,
+                 reset_on_event=True,
+                 text_field: Field=None,
+                 char_field: LookupField=None):
+        """
+
+        :param inp:
+        :param reset_on_scene:
+        :param reset_on_event:
+        :param text_field: provide this field if you want to map text to word ids.
+         by default it splits words by white space and return words as sequence
+        :param char_field: provide this field if you want to map character name to id.
+        """
+        if type(inp) is str:
+            inp = Path(inp)
+        if isinstance(inp, Path):
+            assert inp.exists()
+            inp = IO.reader(inp).open()
+        self.reader = inp
+
+        self.reset_chars = set()
+        if reset_on_event:
+            self.reset_chars.add('<event>')
+        if reset_on_scene:
+            self.reset_chars.add('<scene>')
+        assert self.reset_chars
+        self.text_field = text_field
+        self.char_field = char_field
+
+    def __iter__(self):
+        count = 0
+        dialog = Dialog()
+        for line in self.reader:
+            line = line.strip()
+            if not line:
+                if len(dialog) > 0:
+                    yield dialog
                     count += 1
-            log.debug(f"{path} has {count} non empty lines")
-            return count
+                    dialog = Dialog()
+                continue
+            char, text = line.split("\t")[-2:]
+            char = char.strip()
+            if char in self.reset_chars and len(dialog) > 0:
+                yield dialog
+                count += 1
+                dialog = Dialog()
+
+            if self.char_field:
+                char = self.char_field.encode_as_id(char)
+            if self.text_field:
+                seq = self.text_field.encode_as_ids(text)
+            else:
+                seq = text.strip().split()
+            dialog.add_chat(char, seq)
+        if len(dialog) > 0:
+            count += 1
+            yield dialog
+        log.info(f"Read {count} dialogs")
+
+        try:
+            self.reader.close()
+        except:
+            pass
+
+
+class DialogReader:
+
+    def __init__(self, path: Path, char_field: LookupField,
+                 reset_on_scene=True, reset_on_event=True):
+        """
+        :param path: path to read TSV
+        :param char_field:
+        :param reset_on_scene:
+        :param reset_on_event:
+        """
+        assert path.exists()
+        self.path = path
+        self.reset_chars = set()
+        if reset_on_event:
+            assert '<event>' in char_field
+            self.reset_chars.add(char_field['<event>'])
+        if reset_on_scene:
+            assert '<scene>' in char_field
+            self.reset_chars.add(char_field['<scene>'])
+        assert self.reset_chars
+
+    def __iter__(self):
+        count = 0
+        with IO.reader(self.path) as reader:
+            dialog = Dialog()
+            for line in reader:
+                char, seq = line.split("\t")
+                char, seq = int(char), [int(x) for x in seq.strip().split()]
+                if char in self.reset_chars and len(dialog) > 0:
+                    yield dialog
+                    count += 1
+                    dialog = Dialog()
+                dialog.add_chat(char, seq)
+            if len(dialog):
+                count += 1
+                yield dialog
+        log.info(f"Read {count} dialogs")
+
+
+@dataclass
+class DialogMiniBatchRaw:
+    utters: List[Utterance] = field(default_factory=list)
+    chats: List[ChatRecIdx] = field(default_factory=list)
+
+    @property
+    def is_empty(self):
+        return len(self.chats) == 0
+
+    def sort_desc(self, add_eos=True):
+        """
+        Sort descending order of sequence lengths.
+        There is two levels of sorting involved.
+            level1: sort the chats based on length of context
+            level2: sort the utterances based on number of words
+        :return:
+        """
+
+        if add_eos:
+            for u in self.utters:
+                if u.text[-1] != EOS_TOK_IDX:
+                    u.text.append(EOS_TOK_IDX)
+
+        # Step1: sort chats based on context length
+        self.chats: List[ChatRecIdx] = sorted(self.chats, key=lambda x: len(x), reverse=True)
+
+        # step 2: sort Utterance based on sequence length (number of words)
+        #       Not so easy, we need to map the indexes in chat afters
+        old_idx_uttrs = enumerate(self.utters)
+        sorted_idx_uttrs = sorted(old_idx_uttrs, key=lambda idx_n_uttr: len(idx_n_uttr[1]),
+                                  reverse=True)
+        new_n_old_idx_uttrs = list(enumerate(sorted_idx_uttrs))
+        old_to_new_idx = {new_idx: old_idx for new_idx, (old_idx, uttr) in new_n_old_idx_uttrs}
+
+        self.utters: List[Utterance] = [uttr for _, (_, uttr) in new_n_old_idx_uttrs]
+        for chat in self.chats:
+            chat.context = [old_to_new_idx[old_idx] for old_idx in chat.context]
+            chat.resp = old_to_new_idx[chat.resp]
 
     @staticmethod
-    def _parse(line: str):
-        return [int(t) for t in line.split()]
+    def new(utters: List[Utterance], chats: List[ChatRec], sort_desc=True, pad=True):
+        # going to indexify these
+        utters: List[Utterance] = list(utters)  # make a copy
 
-    def read_all(self) -> Iterator[Example]:
-        with IO.reader(self.path) as lines:
-            recs = (line.split('\t') for line in lines)
-            for rec in recs:
-                if rec[0] and rec[0].strip():
-                    yield Example(self._parse(rec[0]), self._parse(rec[1]) if len(rec) > 1 else None)
+        utter_map = {utter: idx for idx, utter in enumerate(utters)}
+        idxed_chats = [ChatRecIdx([utter_map[ut] for ut in chat.context],
+                                  utter_map[chat.response])
+                       for chat in chats]
+        batch = DialogMiniBatchRaw(utters, idxed_chats)
+        if sort_desc:
+            batch.sort_desc()
+        result = DialogMiniBatch(batch) if pad else batch
+        return result
 
-    def __len__(self):
-        return self._len
+    def print(self):
+        print(f"Dialog: {id(self):X}, Utters: {len(self.utters)}; Chats: {len(self.chats)}")
+        for idx, ut in enumerate(self.utters):
+            print(f"{idx} :: {ut.char}: {ut.text}")
+        for idx, chat in enumerate(self.chats):
+            print(f"  {idx} :: {chat.context} --> {chat.resp}")
 
-    def __iter__(self) -> Iterator[Example]:
-        if self.read_counter == 0 and self.longest_first:
-            log.info("Sorting the dataset by length of source sequence")
-            # reverse sort for the first read,
-            # Why ? => try to cause OOM at the beginning if there is a chance of OOM down the line
-            self.mem = sorted(self.mem, key=lambda ex: len(ex.x), reverse=True)
-            log.info(f"Longest source seq length: {len(self.mem[0].x)}")
-        elif self.shuffle:
-            log.info("shuffling the data...")
-            random.shuffle(self.mem)
 
-        yield from self.mem if self.mem else self.read_all()
-        self.read_counter += 1
+class DialogMiniBatch:
+
+    # Tensors
+    def __init__(self, batch: DialogMiniBatchRaw, max_utter_len=80):
+        self.n_utters = len(batch.utters)
+        self.n_chats = len(batch.chats)
+        max_utter_len = min(max_utter_len, max(len(u) for u in batch.utters))
+        self.utters = torch.zeros(self.n_utters, max_utter_len, dtype=torch.long, device=device)
+        self.utter_lens = torch.zeros(self.n_utters, dtype=torch.long, device=device)
+        self.chars = torch.zeros(self.n_utters, dtype=torch.long, device=device)
+        for i, utter in enumerate(batch.utters):
+            assert utter.text[-1] == EOS_TOK_IDX
+            # TODO: should I put EOS for the truncated seqs?
+            seq = utter.text[:max_utter_len]
+            self.utter_lens[i] = len(seq)
+            self.chars[i] = utter.char
+            self.utters[i, :len(seq)] = tensor(seq)
+
+        self.chat_lens = tensor(list(map(len, batch.chats)), dtype=torch.int)
+        max_chat_len = self.chat_lens.max()
+
+        # -1 is padding, it will be incremented later
+        self.chat_ctx_idx = torch.full((self.n_chats, max_chat_len), -1,
+                                       dtype=torch.long, device=device)
+
+        for i, chat in enumerate(batch.chats):
+            self.chat_ctx_idx[i, :len(chat)] = tensor(chat.context, dtype=torch.int)
+        self.chat_ctx_idx += 1  # zero is padding
+        chat_resp_idx = tensor([c.resp for c in batch.chats], dtype=torch.long)
+
+        # task: prepare response sequence
+        self.resp_seqs = torch.index_select(self.utters, 0, chat_resp_idx)
+        self.resp_chars = torch.index_select(self.chars, 0, chat_resp_idx)
+        self.resp_lens = torch.index_select(self.utter_lens, 0, chat_resp_idx)
+        self.max_resp_len = self.resp_lens.max()
+        self.tot_resp_toks = self.resp_lens.sum()
+
+    def print(self):
+        print(f"Dialog: {id(self):X}, Utters: {self.n_utters}; Chats: {self.n_chats}")
+        print(torch.cat([self.chars.unsqueeze(1), self.utter_lens.unsqueeze(1), self.utters, ],
+                        dim=1))
+        print(torch.cat([self.chat_lens.unsqueeze(1), self.chat_ctx_idx,
+                         self.chat_resp_idx.unsqueeze(1)], dim=1))
+
+
+class OrderedSet(dict):
+    """
+    Sigh, why is this not part of python standard library? (Java I miss you!)
+    """
+
+    def maybe_update(self, items):
+        new_items = [it for it in items if it not in self]
+        start_idx = len(self)
+        update = {itm: start_idx + idx for idx, itm in enumerate(new_items)}
+        self.update(update)
+
+    def maybe_add(self, item):
+        if item not in self:
+            self[item] = len(self)
+
+    def to_list(self):
+        return list(self.keys())
+
+
+class DialogBatchReader:
+
+    def __init__(self, reader: DialogReader, min_ctx: int = 2, max_ctx: int = 10,
+                 max_utters: int = 10, max_dialogs: int = 20, sort_desc: bool = True, pad=True):
+        assert 0 < min_ctx <= max_ctx
+        assert 0 < max_utters <= max_dialogs
+
+        self.reader: Iterator[Dialog] = reader
+        self.min_ctx = min_ctx
+        self.max_ctx = max_ctx
+        self.max_utters = max_utters  # Note: this is not guaranteed
+        self.max_dialogs = max_dialogs
+        self.sort_desc = sort_desc
+        self.pad = pad
+
+    def __iter__(self):
+        count = 0
+        utters: OrderedSet = OrderedSet()
+        chats: List[ChatRec] = list()
+
+        def utters_space():
+            return self.max_utters - len(utters)
+
+        def dialog_space():
+            return self.max_dialogs - len(chats)
+
+        for dialog in self.reader:
+            for chat in dialog.as_mini_chats(min_ctx=self.min_ctx, max_ctx=self.max_ctx):
+                utters.maybe_update(chat.context)  # this might exceed max_utters, but that's okay
+                utters.maybe_add(chat.response)
+                chats.append(chat)
+                if utters_space() <= 0 or dialog_space() <= 0:
+                    batch = DialogMiniBatchRaw.new(utters.to_list(), chats=chats,
+                                                   sort_desc=self.sort_desc, pad=self.pad)
+                    yield batch
+                    count += 1
+                    utters.clear()
+                    chats.clear()
+        if chats:  # left over in the buffer
+            yield DialogMiniBatchRaw.new(utters.to_list(), chats=chats, sort_desc=self.sort_desc,
+                                         pad=self.pad)
+            count += 1
+        log.info(f"Produced {count} dialog batches")
+
+
+def _test_batching_():
+    """
+    A quick test on how batching works
+    :return:
+# Without sort
+===batch:0==
+Dialog: 11A353240, Utters: 5; Dialogs: 4
+0 :: 0: ['u00', 'u01', 'u02', 'u03', 'u04', 'u05']
+1 :: 1: ['u10', 'u11', 'u12']
+2 :: 2: ['u20', 'u21', 'u22', 'u23', 'u24']
+3 :: 3: ['u30', 'u31', 'u32', 'u33', 'u34', 'u35']
+4 :: 4: ['u40', 'u41']
+  0 :: [0, 1] --> 2
+  1 :: [0, 1, 2] --> 3
+  2 :: [1, 2] --> 3
+  3 :: [0, 1, 2, 3] --> 4
+
+....
+
+===batch:3==
+Dialog: 11A3531D0, Utters: 7; Dialogs: 3
+0 :: 3: ['u30', 'u31', 'u32', 'u33', 'u34', 'u35']
+1 :: 4: ['u40', 'u41']
+2 :: 5: ['u50', 'u51', 'u52', 'u53', 'u54', 'u55']
+3 :: 6: ['u60', 'u61', 'u62', 'u63', 'u64']
+4 :: 10: ['b00', 'b01']
+5 :: 11: ['b10', 'b11', 'b12']
+6 :: 12: ['b20']
+  0 :: [0, 1, 2] --> 3
+  1 :: [1, 2] --> 3
+  2 :: [4, 5] --> 6
+
+## Sorted
+===batch:0==
+Dialog: 11E4FE358, Utters: 5; Dialogs: 4
+0 :: 0: ['u00', 'u01', 'u02', 'u03', 'u04', 'u05']
+1 :: 3: ['u30', 'u31', 'u32', 'u33', 'u34', 'u35']
+2 :: 2: ['u20', 'u21', 'u22', 'u23', 'u24']
+3 :: 1: ['u10', 'u11', 'u12']
+4 :: 4: ['u40', 'u41']
+  0 :: [0, 3, 2, 1] --> 4
+  1 :: [0, 3, 2] --> 1
+  2 :: [0, 3] --> 2
+  3 :: [3, 2] --> 1
+
+ .....
+
+===batch:3==
+Dialog: 11E4FE2E8, Utters: 7; Dialogs: 3
+0 :: 3: ['u30', 'u31', 'u32', 'u33', 'u34', 'u35']
+1 :: 5: ['u50', 'u51', 'u52', 'u53', 'u54', 'u55']
+2 :: 6: ['u60', 'u61', 'u62', 'u63', 'u64']
+3 :: 11: ['b10', 'b11', 'b12']
+4 :: 4: ['u40', 'u41']
+5 :: 10: ['b00', 'b01']
+6 :: 12: ['b20']
+  0 :: [0, 2, 3] --> 5
+  1 :: [2, 3] --> 5
+  2 :: [1, 4] --> 6
+
+# Padding
+
+Dialog: 116E7C9E8, Utters: 4; Chats: 3
+   >>   [char_id, len, -- utter --- ] padding=0
+tensor([[ 0,  6,  0,  1,  2,  3,  4,  5],
+        [ 3,  6, 30, 31, 32, 33, 34, 35],
+        [ 2,  5, 20, 21, 22, 23, 24,  0],
+        [ 1,  3, 10, 11, 12,  0,  0,  0]])
+  >>  [len, -- ctx --, resp] padding=-1
+tensor([[ 3,  0,  3,  2,  1],
+        [ 2,  0,  3, -1,  2],
+        [ 2,  3,  2, -1,  1]], dtype=torch.int32)
+"""
+    seq = [
+        Utterance(0, ['u00', 'u01', 'u02', 'u03', 'u04', 'u05']),
+        Utterance(1, ['u10', 'u11', 'u12']),
+        Utterance(2, ['u20', 'u21', 'u22', 'u23', 'u24']),
+        Utterance(3, ['u30', 'u31', 'u32', 'u33', 'u34', 'u35']),
+        Utterance(4, ['u40', 'u41']),
+        Utterance(5, ['u50', 'u51', 'u52', 'u53', 'u54', 'u55']),
+        Utterance(6, ['u60', 'u61', 'u62', 'u63', 'u64']),
+    ]
+    d1 = Dialog(chat=seq)
+    d2 = Dialog(chat=[
+        Utterance(10, ['b00', 'b01']),
+        Utterance(11, ['b10', 'b11', 'b12']),
+        Utterance(12, ['b20']),
+    ])
+    r: Iterator[DialogMiniBatchRaw] = DialogBatchReader(
+        reader=[d1, d2], min_ctx=2, max_ctx=4, max_utters=5, max_dialogs=5, sort_desc=True,
+        pad=False)
+
+    for i, b in enumerate(r):
+        print(f"===batch:{i}==")
+        b.print()
+
+    d3 = Dialog(chat=[
+        Utterance(0, [0, 1, 2, 3, 4, 5]),
+        Utterance(1, [10, 11, 12]),
+        Utterance(2, [20, 21, 22, 23, 24]),
+        Utterance(3, [30, 31, 32, 33, 34, 35])])
+
+    r: Iterator[DialogMiniBatch] = DialogBatchReader(
+        reader=[d3], min_ctx=2, max_ctx=4, max_utters=5, max_dialogs=5, sort_desc=True,
+        pad=True)
+    for i, b in enumerate(r):
+        print(f"===batch:{i}==")
+        b.print()
+
+
+if __name__ == '__main__':
+    _test_batching_()
+
+
+class LoopingIterable:
+    """
+    An iterable that keeps looping until a specified count is reached
+    """
+
+    def __init__(self, iterable, total: int = sys.maxsize):
+        self.itr = iterable
+        self.total = total
+        self.count = 0
+
+    def __iter__(self):
+        self.count = 0  # reset
+        while True:
+            for item in self.itr:
+                yield item
+                self.count += 1
+                if self.count >= self.total:
+                    break
 
 
 def read_tsv(path: str):
@@ -213,160 +679,3 @@ def subsequent_mask(size):
     mask = triu == 0
     mask = mask.unsqueeze(0)
     return mask
-
-
-class Batch:
-    """
-    An object of this class holds a batch of examples
-    """
-    pad_value = PAD_TOK[1]
-    bos_val = BOS_TOK[1]
-    eos_val = EOS_TOK[1]
-
-    _x_attrs = ['x_len', 'x_seqs', 'x_mask']
-    _y_attrs = ['y_len', 'y_seqs', 'y_seqs_nobos', 'y_mask']
-
-    def __init__(self, batch: List[Example], sort_dec=False, batch_first=True, copy_xy=False):
-        """
-        :param batch: List fo Examples
-        :param sort_dec: True if the examples be sorted as descending order of their source sequence lengths
-        :Param Batch_First: first dimension is batch
-        :param copy_xy: copy x to y
-        """
-        for ex in batch:  # check and insert BOS and EOS
-            if ex.x[0] != self.bos_val:
-                ex.x.insert(0, self.bos_val)
-            if ex.x[-1] != self.eos_val:
-                ex.x.append(self.eos_val)
-        self.copy_xy = copy_xy
-        self.batch_first = batch_first
-        if sort_dec:
-            batch = sorted(batch, key=lambda _: len(_.x), reverse=True)
-        self._len = len(batch)
-        self.x_len = tensor([len(e.x) for e in batch])
-        self.x_toks = self.x_len.sum().float().item()
-        self.max_x_len = self.x_len.max()
-
-        # create x_seqs on CPU RAM and move to GPU at once
-        self.x_seqs = torch.full(size=(self._len, self.max_x_len), fill_value=self.pad_value,
-                                 dtype=torch.long)
-        for i, ex in enumerate(batch):
-            self.x_seqs[i, :len(ex.x)] = torch.tensor(ex.x, dtype=torch.long)
-        self.x_seqs = self.x_seqs.to(device)
-        if not batch_first:      # transpose
-            self.x_seqs = self.x_seqs.t()
-
-        self.x_mask = (self.x_seqs != self.pad_value).unsqueeze(1)
-        first_y = batch[0].y
-        self.has_y = first_y is not None
-        if self.has_y:
-            assert not self.copy_xy
-            for ex in batch:    # check and insert BOS to output seqs
-                if ex.y[0] != self.bos_val:
-                    ex.y.insert(0, self.bos_val)
-                if ex.y[-1] != self.eos_val:
-                    ex.y.append(self.eos_val)
-
-            self.y_len = tensor([len(e.y) for e in batch])  # Excluding either BOS or EOS tokens
-            self.y_toks = self.y_len.sum().float().item()
-            self.max_y_len = self.y_len.max().item()
-            y_seqs = torch.full(size=(self._len, self.max_y_len + 1), fill_value=self.pad_value,
-                                dtype=torch.long)
-            for i, ex in enumerate(batch):
-                y_seqs[i, :len(ex.y)] = torch.tensor(ex.y, dtype=torch.long)
-
-            self.y_seqs_nobos = y_seqs[:, 1:].to(device)  # predictions
-            self.y_seqs = y_seqs[:, :-1].to(device)
-            if not batch_first:    # transpose
-                self.y_seqs = self.y_seqs.t()
-                self.y_seqs_nobos = self.y_seqs_nobos.t()
-            self.y_mask = self.make_std_mask(self.y_seqs)
-        elif self.copy_xy:
-            self.has_y = True
-            self.y_toks = self.x_toks
-            self.y_len = self.x_len
-            self.max_y_len = self.max_x_len
-            self.y_seqs = self.x_seqs
-            self.y_seqs_nobos = self.x_seqs[:, 1:]
-
-    def __len__(self):
-        return self._len
-
-    def to(self, device):
-        """Move this batch to given device"""
-        for name in self._x_attrs:
-            setattr(self, name, getattr(self, name).to(device))
-        if self.has_y:
-            for name in self._y_attrs:
-                setattr(self, name, getattr(self, name).to(device))
-        return self
-
-    @staticmethod
-    def make_std_mask(tgt, pad=pad_value):
-        "Create a mask to hide padding and future words."
-        tgt_mask = (tgt != pad).unsqueeze(1)
-        tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(tgt_mask.data)
-        return tgt_mask
-
-
-class BatchIterable:
-    # TODO: How to specify Type Hint for this as Iterable[Batch] ?
-
-    def __init__(self, data_path: Union[str, Path], batch_size: int,
-                 sort_dec=True, batch_first=True, shuffle=False,
-                 copy_xy=False):
-        """
-        Iterator for reading training data in batches
-        :param data_path: path to TSV file
-        :param batch_size: number of examples per batch
-        :param sort_dec: should the records within batch be sorted descending order of sequence length?
-        :param copy_xy: copy x to y, (use it when data is monolingual and you want to make a copy)
-        """
-        self.data = TSVData(data_path, shuffle=shuffle)
-        self.batch_size = batch_size
-        self.sort_dec = sort_dec
-        self.batch_first = batch_first
-        self.copy_xy = copy_xy
-
-    def read_all(self):
-        batch = []
-        for ex in self.data:
-            batch.append(ex)
-            if len(batch) >= self.batch_size:
-                yield Batch(batch, sort_dec=self.sort_dec, batch_first=self.batch_first,
-                            copy_xy=self.copy_xy)
-                batch = []
-        if batch:
-            log.debug(f"\nLast batch, size={len(batch)}")
-            yield Batch(batch, sort_dec=self.sort_dec, batch_first=self.batch_first,
-                        copy_xy=self.copy_xy)
-
-    def __iter__(self):
-        yield from self.read_all()
-
-    @property
-    def num_items(self):
-        return len(self.data)
-
-    @property
-    def num_batches(self):
-        return math.ceil(len(self.data) / self.batch_size)
-
-
-class LoopingIterable:
-    """
-    An iterable that keeps looping until a specified number of step count is reached
-    """
-
-    def __init__(self, iterable: BatchIterable, batches: int):
-        self.itr = iterable
-        self.total = batches
-        self.count = 0
-
-    def __iter__(self):
-        while self.count < self.total:
-            for batch in self.itr:
-                yield batch
-                self.count += 1
-                if self.count >= self.total:
-                    break

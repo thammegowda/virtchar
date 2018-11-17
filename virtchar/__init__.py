@@ -26,7 +26,7 @@ if os.environ.get('NMT_PROFILER') == 'memory':
 
 
 def my_tensor(*args, **kwargs):
-    return torch.tensor(*args, device=device, **kwargs)
+    return torch.tensor(*args, device=kwargs.pop('device', device), **kwargs)
 
 
 def profile(func, *args):
@@ -47,7 +47,6 @@ def load_conf(inp):
 
 
 from virtchar.tool import dataprep
-from virtchar.tool.dataprep import BatchIterable, Batch
 from virtchar.tool.exp import DialogExperiment
 from virtchar.model import t2t
 

@@ -26,4 +26,4 @@ prep:
   - Chandler
   - Phoebe
   - Joey
-  - Gunter
+  - Gunter    # one low appearance character to test low-resource

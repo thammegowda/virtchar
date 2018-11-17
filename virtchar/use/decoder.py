@@ -2,15 +2,16 @@ import abc
 import time
 import traceback
 from collections import OrderedDict
-from typing import List, Tuple, Type, Dict, Any, Optional
+from typing import List, Tuple, Type, Dict, Any, Optional, Iterator
 
 import torch
 from torch import nn as nn
 
-from virtchar import DialogExperiment as Experiment
+from virtchar import DialogExperiment
 from virtchar import log, device, my_tensor as tensor, debug_mode
-from virtchar.model.rnn import Seq2Seq
-from virtchar.tool.dataprep import PAD_TOK, BOS_TOK, EOS_TOK, subsequent_mask
+from virtchar.model.rnn import HRED
+from virtchar.tool.dataprep import PAD_TOK, BOS_TOK, EOS_TOK, subsequent_mask, \
+    RawDialogReader, ChatRec, DialogMiniBatch
 from virtchar.model.t2t import T2TModel
 
 Hypothesis = Tuple[float, List[int]]
@@ -20,7 +21,7 @@ StrHypothesis = Tuple[float, str]
 # TODO: simplify the generators
 class GeneratorFactory(abc.ABC):
 
-    def __init__(self, model, **kwargs):
+    def __init__(self, model, *args, **kwargs):
         self.model = model
 
     @abc.abstractmethod
@@ -30,16 +31,21 @@ class GeneratorFactory(abc.ABC):
 
 class Seq2SeqGenerator(GeneratorFactory):
 
-    def __init__(self, model: Seq2Seq, x_seqs, x_lens):
+    def __init__(self, model: HRED, batch: DialogMiniBatch):
+        """
+        :param model: model
+        :param batch:
+        """
         super().__init__(model)
-        # [S, B, d], [S, B, d] <-- [S, B], [B]
-        self.enc_outs, enc_hids = model.encode(x_seqs, x_lens, None)
-        # [S, B, d]
+        self.enc_outs, enc_hids = model.hiero_encode(batch.utters, batch.utter_lens, batch.chars,
+                                                     batch.chat_ctx_idx, batch.chat_lens)
         self.dec_hids = enc_hids
+        self.resp_chars = batch.resp_chars
 
     def generate_next(self, past_ys):
         last_ys = past_ys[:, -1]
-        log_probs, self.dec_hids, _ = self.model.dec(self.enc_outs, last_ys, self.dec_hids)
+        log_probs, self.dec_hids, _ = self.model.dec(self.enc_outs, last_ys, self.dec_hids,
+                                                     self.resp_chars)
         return log_probs
 
 
@@ -57,11 +63,11 @@ class T2TGenerator(GeneratorFactory):
 
 
 generators = {'t2t': T2TGenerator,
-              'seq2seq': Seq2SeqGenerator
+              'HRED': Seq2SeqGenerator
               }
 factories = {
     't2t': T2TModel.make_model,
-    'seq2seq': Seq2Seq.make_model,
+    'HRED': HRED.make_model,
 }
 
 
@@ -82,16 +88,17 @@ class Decoder:
     eos_val = EOS_TOK[1]
     default_beam_size = 5
 
-    def __init__(self, model, gen_factory: Type[GeneratorFactory], exp, gen_args=None,
+    def __init__(self, model, gen_factory: Type[GeneratorFactory], exp: DialogExperiment,
+                 gen_args=None,
                  debug=debug_mode):
         self.model = model
-        self.exp = exp
+        self.exp: DialogExperiment = exp
         self.gen_factory = gen_factory
         self.debug = debug
         self.gen_args = gen_args if gen_args is not None else {}
 
-    def generator(self, x_seqs, x_lens):
-        return self.gen_factory(self.model, x_seqs=x_seqs, x_lens=x_lens, **self.gen_args)
+    def generator(self, batch: DialogMiniBatch):
+        return self.gen_factory(self.model, batch, **self.gen_args)
 
     @staticmethod
     def average_states(state_dict: OrderedDict, *state_dicts: OrderedDict):
@@ -106,7 +113,7 @@ class Decoder:
         return state_dict
 
     @staticmethod
-    def maybe_ensemble_state(exp, model_paths: Optional[List[str]], ensemble: int=1):
+    def maybe_ensemble_state(exp, model_paths: Optional[List[str]], ensemble: int = 1):
         if model_paths and len(model_paths) == 1:
             log.info(f" Restoring state from requested model {model_paths[0]}")
             return torch.load(model_paths[0])
@@ -123,9 +130,9 @@ class Decoder:
             return Decoder.average_states(*states)
 
     @classmethod
-    def new(cls, exp: Experiment, model=None, gen_args=None,
-            model_paths: Optional[List[str]]=None,
-            ensemble: int=1):
+    def new(cls, exp: DialogExperiment, model=None, gen_args=None,
+            model_paths: Optional[List[str]] = None,
+            ensemble: int = 1):
         """
         create a new decoder
         :param exp: experiment
@@ -148,17 +155,16 @@ class Decoder:
         generator = generators[exp.model_type]
         return cls(model, generator, exp, gen_args)
 
-    def greedy_decode(self, x_seqs, x_lens, max_len, **args) -> List[Hypothesis]:
+    def greedy_decode(self, mini_batch: DialogMiniBatch, max_len, **args) -> List[Hypothesis]:
         """
         Implements a simple greedy decoder
-        :param x_seqs:
-        :param x_lens: length of x sequences
+        :param mini_batch:
         :param max_len:
         :return:
         """
+        gen = self.generator(mini_batch)
+        batch_size = mini_batch.n_chats
 
-        gen = self.generator(x_seqs, x_lens)
-        batch_size = x_seqs.size(0)
         ys = torch.full(size=(batch_size, 1), fill_value=self.bos_val, dtype=torch.long,
                         device=device)
         scores = torch.zeros(batch_size, device=device)
@@ -185,10 +191,11 @@ class Decoder:
         selected = x.masked_select(mask)
         return selected.view(-1, x.size(1))
 
-    def beam_decode(self, x_seqs, x_lens, max_len, beam_size=default_beam_size, num_hyp=None,
+    def beam_decode(self, batch: DialogMiniBatch, max_len, beam_size=default_beam_size,
+                    num_hyp=None,
                     **args) -> List[List[Hypothesis]]:
         """
-        :param x_seqs: input batch of sequences
+        :param batch: input batch of sequences
         :param max_len:  maximum length to consider if decoder doesnt produce EOS token
         :param beam_size: beam size
         :param num_hyp: number of hypothesis in each beam to return
@@ -198,7 +205,7 @@ class Decoder:
         """
         # TODO: rewrite this, this function is a mess!
         # repeat beam size
-        batch_size = x_seqs.size(0)
+        batch_size = batch.n_chats
         assert batch_size == 1  # TODO: test large batches
         if not num_hyp:
             num_hyp = beam_size
@@ -313,45 +320,22 @@ class Decoder:
         return result
 
     @property
-    def inp_vocab(self):
-        # the choice of vocabulary can be tricky, because of bidirectional model
-        if self.exp.model_type == 'binmt':
-            return {
-                'E1': self.exp.src_vocab,
-                'E2': self.exp.tgt_vocab
-            }[self.gen_args['path'][:2]]
-        else:   # all others go from source as input to target as output
-            return self.exp.src_vocab
+    def text_vocab(self):
+        return self.exp.text_field
 
     @property
-    def out_vocab(self):
-        # the choice of vocabulary can be tricky, because of bidirectional model
-        if self.exp.model_type == 'binmt':
-            return {
-                'D1': self.exp.src_vocab,
-                'D2': self.exp.tgt_vocab
-            }[self.gen_args['path'][-2:]]
-        else:  # all others go from source as input to target as output
-            return self.exp.tgt_vocab
+    def char_vocab(self):
+        return self.exp.char_field
 
-    def decode_sentence(self, line: str, max_len=20, prepared=False, **args) -> List[StrHypothesis]:
+    def generate_chat(self, batch: DialogMiniBatch, **args) -> List[StrHypothesis]:
+        assert batch.n_chats == 1  # testing one at a time, for now
 
-        line = line.strip()
-        if prepared:
-            in_seq = [int(t) for t in line.split()]
-            if in_seq[0] != self.bos_val:
-                in_seq.insert(0, self.bos_val)
-            if in_seq[-1] != self.eos_val:
-                in_seq.append(self.eos_val)
-        else:
-            in_seq = self.inp_vocab.encode_as_ids(line, add_eos=True, add_bos=True)
-        in_seqs = tensor(in_seq, dtype=torch.long).view(1, -1)
-        in_lens = tensor([len(in_seq)], dtype=torch.long)
-        if self.debug:
-            greedy_score, greedy_out = self.greedy_decode(in_seqs, in_lens, max_len, **args)[0]
-            greedy_out = self.out_vocab.decode_ids(greedy_out, trunc_eos=True)
-            log.debug(f'Greedy : score: {greedy_score:.4f} :: {greedy_out}')
-
+        greedy_score, greedy_out = self.greedy_decode(batch, **args)[0]
+        greedy_out = self.text_vocab.decode_ids(greedy_out, trunc_eos=True)
+        log.debug(f'Greedy : score: {greedy_score:.4f} :: {greedy_out}')
+        result = [(greedy_score, greedy_out)]
+        """
+        FIXME: beam decode
         beams: List[List[Hypothesis]] = self.beam_decode(in_seqs, in_lens, max_len, **args)
         beams = beams[0]  # first sentence, the only one we passed to it as input
         result = []
@@ -360,6 +344,7 @@ class Decoder:
             if self.debug:
                 log.debug(f"Beam {i}: score:{score:.4f} :: {out}")
             result.append((score, out))
+        """
         return result
 
     # noinspection PyUnresolvedReferences
@@ -440,7 +425,7 @@ class Decoder:
                     for score, hyp in res:
                         print(f'  {score:.4f}\t{hyp}')
             except ReloadEvent as re:
-                raise re        # send it to caller
+                raise re  # send it to caller
             except EOFError as e1:
                 break
             except Exception:
@@ -448,21 +433,26 @@ class Decoder:
                 print_state = True
 
     def decode_file(self, inp, out, **args):
-        for i, line in enumerate(inp):
-            line = line.strip()
-            if not line:
-                log.warning(f"line {i+1} was empty. skipping it for now. "
-                            f"Empty lines are problematic when you want line-by-line alignment...")
-                continue
-            cols = line.split('\t')
-            input = cols[0]
-            log.debug(f"INP: {i}: {cols[0]}")
-            if len(cols) > 1:  # assumption: second column is reference
-                log.debug(f"REF: {i}: {cols[1]}")
-            result = self.decode_sentence(input, **args)
-            num_hyp = args['num_hyp']
-            out_line = '\n'.join(f'{hyp}\t{score:.4f}' for score, hyp in result)
-            out.write(f'{out_line}\n')
-            log.debug(f"OUT: {i}: {out_line}\n")
-            if num_hyp > 1:
-                out.write('\n')
+        reader = RawDialogReader(inp, text_field=self.text_vocab, char_field=self.char_vocab)
+
+        # Todo: get these form  args
+        min_ctx, max_ctx = 3, 6
+        test_chars = ('Monica', 'Chandler')
+        assert all(x in self.char_vocab for x in test_chars)
+        test_chars = [self.char_vocab[x] for x in test_chars]
+        for i, dialog in enumerate(reader):
+            chats: Iterator[ChatRec] = dialog.as_test_chats(min_ctx=min_ctx, max_ctx=max_ctx,
+                                                            test_chars=test_chars)
+            batches: Iterator[Tuple[ChatRec, DialogMiniBatch]] = \
+                [(c, c.as_dialog_mini_batch()) for c in chats]
+            # One chat in batch. Should/can be improved later
+            for j, (chat, batch) in enumerate(batches):
+                log.info(f"dialog: {i}: chat: {j} : {chat.response}")
+
+                result = self.generate_chat(batch, **args)
+                num_hyp = args['num_hyp']
+                out_line = '\n'.join(f'{hyp}\t{score:.4f}' for score, hyp in result)
+                out.write(f'{out_line}\n')
+                log.debug(f"OUT: {i}: {out_line}\n")
+                if num_hyp > 1:
+                    out.write('\n')

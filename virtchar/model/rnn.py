@@ -1,15 +1,16 @@
 import random
-from typing import Optional, Callable
+from typing import Optional, Callable, Iterator
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch import Tensor
 from tqdm import tqdm
 
 from virtchar import log, DialogExperiment as Experiment
 from virtchar import my_tensor as tensor, device
-from virtchar.tool.dataprep import PAD_TOK_IDX, BOS_TOK_IDX, Batch, BatchIterable
-from virtchar.model import NMTModel
+from virtchar.tool.dataprep import PAD_TOK_IDX, BOS_TOK_IDX, DialogMiniBatch
+from virtchar.model import DialogModel
 from virtchar.model.trainer import TrainerState, SteppedTrainer
 
 
@@ -46,14 +47,12 @@ class Generator(nn.Module):
         return F.log_softmax(self.proj(x), dim=-1)
 
 
-class SeqEncoder(nn.Module):
+class BaseEncoder(nn.Module):
 
-    def __init__(self, embedder: Embedder, out_size: int, n_layers: int,
-                 bidirectional: bool = True, dropout=0.5):
+    def __init__(self, inp_size, out_size, n_layers, bidirectional, dropout=0.5):
         super().__init__()
-        self.emb = embedder
         self.dropout = nn.Dropout(dropout)
-        self.emb_size = self.emb.emb_size
+        self.inp_size = inp_size
         self.out_size = out_size
         self.n_layers = n_layers
         self.bidirectional = bidirectional
@@ -62,29 +61,26 @@ class SeqEncoder(nn.Module):
         if self.bidirectional:
             assert self.out_size % 2 == 0
             out_size = out_size // 2
-        self.rnn_node = nn.LSTM(self.emb_size, out_size, num_layers=self.n_layers,
+        self.rnn_node = nn.LSTM(self.inp_size, out_size, num_layers=self.n_layers,
                                 bidirectional=self.bidirectional, batch_first=True,
                                 dropout=dropout if n_layers > 1 else 0)
 
-    def forward(self, input_seqs: torch.Tensor, input_lengths, hidden=None, pre_embedded=False):
-        assert len(input_seqs) == len(input_lengths)
-        if pre_embedded:
-            embedded = input_seqs
-            batch_size, seq_len, emb_size = input_seqs.shape
-            assert emb_size == self.emb_size
-        else:
-            batch_size, seq_len = input_seqs.shape
-            embedded = self.emb(input_seqs).view(batch_size, seq_len, self.emb_size)
+    def forward(self, embedded, seq_lens, hidden=None):
+        # assert not args     # must be empty
+        # assert not kwargs  # it must be empty
         embedded = self.dropout(embedded)
-        packed = nn.utils.rnn.pack_padded_sequence(embedded, input_lengths, batch_first=True)
+        # sorting
+        try:
+            packed = nn.utils.rnn.pack_padded_sequence(embedded, seq_lens, batch_first=True)
+        except:
+            print(seq_lens)
+            raise
         outputs, hidden = self.rnn_node(packed, hidden)
         outputs, output_lengths = nn.utils.rnn.pad_packed_sequence(outputs, batch_first=True,
                                                                    padding_value=PAD_TOK_IDX)
-        # Sum bidirectional outputs
-        # outputs = outputs[:, :, :self.hid_size] + outputs[:, :, self.hid_size:]
-        return outputs, self.to_dec_state(hidden)
+        return outputs, hidden
 
-    def to_dec_state(self, enc_state):
+    def get_last_layer_last_step(self, enc_state):
         # get the last layer's last time step output
         # lnhn is layer n hidden n which is last layer last hidden. similarly lncn
         hns, cns = enc_state
@@ -97,36 +93,128 @@ class SeqEncoder(nn.Module):
         else:
             lnhn = hns.view(self.n_layers, hns.shape[1], hns.shape[-1])[-1]
             lncn = cns.view(self.n_layers, cns.shape[1], cns.shape[-1])[-1]
+        return lnhn, lncn
 
+
+class UtteranceEncoder(BaseEncoder):
+    # also read it as SentenceEncoder
+
+    def __init__(self, text_emb: Embedder,
+                 char_emb: Embedder,
+                 out_size: int,
+                 n_layers: int,
+                 bidirectional: bool = True,
+                 dropout=0.2):
+
+        self.emb_size = text_emb.emb_size + char_emb.emb_size
+        super().__init__(inp_size=self.emb_size, out_size=out_size, n_layers=n_layers,
+                         bidirectional=bidirectional, dropout=dropout)
+
+        # First level, deals with text; so embeddings are needed
+        self.text_emb = text_emb
+        self.char_emb = char_emb
+
+        # LSTMs produce h_t and c_t, we are going to compress them
+        self.compressor = nn.Linear(self.out_size * 2, self.out_size)
+
+    def forward(self, utters: Tensor, utter_lens: Tensor, chars: Tensor = None, hidden=None):
+
+        batch_size = utters.shape[0]
+        if chars is not None:
+            assert batch_size == chars.shape[0]
+        seq_len = utters.shape[1]  # padded
+
+        text_embedded = self.text_emb(utters).view(batch_size, seq_len, self.text_emb.emb_size)
+        char_embedded = self.char_emb(chars).view(batch_size, 1, self.char_emb.emb_size)
+        # repeat the character embedding for each time step in sequence
+        char_embedded = char_embedded.expand(batch_size, seq_len, self.char_emb.emb_size)
+
+        # TODO: character embedding masking by length, when unequal length batch
+        # concat word embedding and character embedding along the last dimension
+        embedded = torch.cat([text_embedded, char_embedded], dim=-1)
+
+        outputs, hidden_state = super().forward(embedded, utter_lens, hidden=hidden)
+
+        # Sum bidirectional outputs
+        # outputs = outputs[:, :, :self.hid_size] + outputs[:, :, self.hid_size:]
+        lnhn, lncn = self.get_last_layer_last_step(hidden_state)
+        sent_repr = self.compressor(torch.cat([lnhn, lncn], dim=-1))
+        return outputs, sent_repr
+
+    def to_dec_state(self, enc_state, dec_layers=None):
+        lnhn, lncn = self.get_last_layer_last_step(enc_state)
         # lnhn and lncn hold compact representation
+
+        if not dec_layers:
+            dec_layers = self.n_layers
         # duplicate for decoder layers
-        return (lnhn.expand(self.n_layers, *lnhn.shape).contiguous(),
-                lncn.expand(self.n_layers, *lncn.shape).contiguous())
+        return (lnhn.expand(dec_layers, *lnhn.shape).contiguous(),
+                lncn.expand(dec_layers, *lncn.shape).contiguous())
+
+    def to_sent_repr(self, enc_state):
+        lnhn, lncn = self.get_last_layer_last_step(enc_state)
+        return lnhn + lncn
+
+
+class ContextEncoder(BaseEncoder):
+    # also read it as ParagraphEncoder
+
+    def __init__(self,
+                 inp_size: int,
+                 out_size: int,
+                 n_layers: int,
+                 bidirectional: bool = True,
+                 dec_layers: Optional[int] = None,
+                 dropout=0.2):
+        super().__init__(inp_size=inp_size, out_size=out_size, n_layers=n_layers,
+                         bidirectional=bidirectional, dropout=dropout)
+        self.dec_layers = dec_layers if dec_layers else n_layers
+
+    def forward(self, embedded: Tensor, seq_lens: Tensor, hidden=None):
+        outputs, hidden_state = super().forward(embedded, seq_lens, hidden=hidden)
+        lnhn, lncn = self.get_last_layer_last_step(hidden_state)
+
+        # duplicate it decoder layers
+        lnhn = lnhn.expand(self.dec_layers, *lnhn.shape).contiguous()
+        lncn = lncn.expand(self.dec_layers, *lncn.shape).contiguous()
+
+        return outputs, (lnhn, lncn)
 
 
 class SeqDecoder(nn.Module):
 
-    def __init__(self, prev_emb_node: Embedder, generator: Generator, n_layers: int, dropout=0.5):
+    def __init__(self, text_emb: Embedder, char_emb: Embedder, generator: Generator,
+                 n_layers: int, dropout=0.5):
         super(SeqDecoder, self).__init__()
-        self.prev_emb = prev_emb_node
+        self.text_emb = text_emb
+        self.char_emb = char_emb
         self.dropout = nn.Dropout(dropout)
         self.generator = generator
         self.n_layers = n_layers
-        self.emb_size = self.prev_emb.emb_size
+        self.emb_size = self.text_emb.emb_size + self.char_emb.emb_size
         self.hid_size = self.generator.vec_size
-        self.rnn_node = nn.LSTM(self.emb_size, self.hid_size, num_layers=self.n_layers,
+        self.rnn_node = nn.LSTM(self.emb_size, self.hid_size,
+                                num_layers=self.n_layers,
                                 bidirectional=False, batch_first=True,
                                 dropout=dropout if n_layers > 1 else 0)
 
-    def forward(self, enc_outs, prev_out, last_hidden, gen_probs=True):
-        # Note: we run this one step at a time
-
+    def embed_prev(self, prev_out, chars):
         # Get the embedding of the current input word (last output word)
         batch_size = prev_out.size(0)
-        assert len(enc_outs) == batch_size
+
         # S=B x 1 x N
-        embedded = self.prev_emb(prev_out).view(batch_size, 1, self.prev_emb.emb_size)
+        text_embedded = self.text_emb(prev_out).view(batch_size, 1, self.text_emb.emb_size)
+        char_embedded = self.char_emb(chars).view(batch_size, 1, self.char_emb.emb_size)
+        embedded = torch.cat([text_embedded, char_embedded], dim=-1)
         embedded = self.dropout(embedded)
+        return embedded
+
+    def forward(self, enc_outs, prev_out, last_hidden, chars: Tensor = None, gen_probs=True):
+        # Note: we run this one step at a time
+        assert len(enc_outs) == len(prev_out)
+        # Get the embedding of the current input word (last output word)
+        embedded = self.embed_prev(prev_out=prev_out, chars=chars)
+
         # Get current hidden state from input word and last hidden state
         rnn_output, hidden = self.rnn_node(embedded, last_hidden)
 
@@ -142,16 +230,15 @@ class SeqDecoder(nn.Module):
             return rnn_output, hidden, None
 
 
-class GeneralAttn(nn.Module):
+class DotAttn(nn.Module):
     """
     Attention model
     """
 
     def __init__(self, hid_size):
-        super(GeneralAttn, self).__init__()
+        super(DotAttn, self).__init__()
         self.inp_size = hid_size
         self.out_size = hid_size
-        self.attn = nn.Linear(self.inp_size, self.out_size)
 
     def forward(self, this_rnn_out, encoder_outs):
         # hidden      : [B, D]
@@ -168,20 +255,20 @@ class GeneralAttn(nn.Module):
 
 
 class AttnSeqDecoder(SeqDecoder):
-    def __init__(self, prev_emb_node: Embedder, generator: Generator, n_layers: int,
-                 dropout: float=0.5):
-        super(AttnSeqDecoder, self).__init__(prev_emb_node, generator, n_layers, dropout=dropout)
-        self.attn = GeneralAttn(self.hid_size)
+    def __init__(self, text_emb: Embedder, char_emb: Embedder, generator: Generator, n_layers: int,
+                 dropout: float = 0.5):
+        super(AttnSeqDecoder, self).__init__(text_emb=text_emb, char_emb=char_emb,
+                                             generator=generator, n_layers=n_layers,
+                                             dropout=dropout)
+        self.attn = DotAttn(self.hid_size)
         self.merge = nn.Linear(self.hid_size + self.attn.out_size, self.hid_size)
 
-    def forward(self, enc_outs, prev_out, last_hidden, gen_probs=True):
+    def forward(self, enc_outs, prev_out, last_hidden, chars: Tensor = None, gen_probs=True):
         # Note: we run this one step at a time
 
         # Get the embedding of the current input word (last output word)
-        batch_size = prev_out.size(0)
-        embedded = self.prev_emb(prev_out)
-        embedded = embedded.view(batch_size, 1, self.prev_emb.emb_size)
-        embedded = self.dropout(embedded)
+        embedded = self.embed_prev(prev_out=prev_out, chars=chars)
+
         # Get current hidden state from input word and last hidden state
         rnn_output, hidden = self.rnn_node(embedded, last_hidden)
         # [B x N ] <- [B x S=1 x  N]
@@ -211,46 +298,65 @@ class AttnSeqDecoder(SeqDecoder):
             return concat_output, hidden, attn_weights
 
 
-class Seq2Seq(NMTModel):
+class HRED(DialogModel):
 
-    def __init__(self, enc: SeqEncoder, dec: SeqDecoder):
-        super(Seq2Seq, self).__init__()
-        self.enc = enc
+    def __init__(self, utter_enc: UtteranceEncoder, ctx_enc: ContextEncoder, dec: SeqDecoder):
+        # Slight change in terminology: sentence encoder is utterance encoder, and para encoder
+        """
+        Hierarchical encoder decoder model
+        :param utter_enc: sentence encoder
+        :param ctx_enc: paragraph encoder
+        :param dec:
+        """
+        super(HRED, self).__init__()
+        self.utter_enc = utter_enc
+        self.ctx_enc = ctx_enc
         self.dec = dec
-        assert enc.out_size == dec.hid_size
+        assert utter_enc.out_size == ctx_enc.inp_size
+        assert ctx_enc.out_size == dec.hid_size
+        self._model_dim = dec.hid_size
 
     @property
     def model_dim(self):
-        return self.enc.out_size
+        return self._model_dim
 
-    def encode(self, x_seqs, x_lens, hids=None):
-        enc_outs, enc_hids = self.enc(x_seqs, x_lens, hids)
-        return enc_outs, enc_hids
+    def hiero_encode(self, utters, utter_lens, chars, chat_ctx_idx, chat_lens):
+        # :: level 1
+        sent_outs, sent_reprs = self.utter_enc(utters, utter_lens, chars=chars, hidden=None)
+        assert 2 == len(sent_reprs.shape)  # its a 2d tensor
 
-    def forward(self, batch: Batch):
-        assert batch.batch_first
-        batch_size = len(batch)
-        enc_outs, enc_hids = self.encode(batch.x_seqs, batch.x_len, hids=None)
+        # Inserting 0s at the 0th row, so we can pick rows based on indices, where index=0 is pad
+        padded_sent_repr = torch.cat([torch.zeros(1, sent_reprs.shape[1]), sent_reprs], dim=0)
 
+        # index_select works with vector, so we flatten and then restore
+        chat_input = torch.index_select(padded_sent_repr, 0, chat_ctx_idx.view(-1))
+        chat_input = chat_input.view(*chat_ctx_idx.shape, -1)
+
+        # :: level 2
+        ctx_outs, dec_hids = self.ctx_enc(chat_input, chat_lens, hidden=None)
+        return ctx_outs, dec_hids
+
+    def forward(self, batch: DialogMiniBatch):
+        # TODO add attention
+        ctx_outs, dec_hids = self.hiero_encode(batch.utters, batch.utter_lens, batch.chars,
+                                               batch.chat_ctx_idx, batch.chat_lens)
+
+        batch_size = batch.n_chats
         dec_inps = tensor([[BOS_TOK_IDX]] * batch_size, dtype=torch.long)
-        dec_hids = enc_hids
-        """
-        # extract vector at given last stamp (as per the seq length)
-        t_dim = 1
-        lastt_idx = (batch.x_len - 1).view(-1, 1).expand(-1, self.enc.out_size).unsqueeze(t_dim)
-        lastt_out = enc_outs.gather(dim=t_dim, index=lastt_idx).squeeze(t_dim)
-        lastt_out = lastt_out.expand(self.dec.n_layers, batch_size, self.dec.generator.vec_size)
-        dec_hids = (lastt_out, lastt_out)   # copy enc output to h and c of LSTM
-        """
-        outp_probs = torch.zeros((batch.max_y_len - 1, batch_size), device=device)
 
-        for t in range(1, batch.max_y_len):
-            word_probs, dec_hids, _ = self.dec(enc_outs, dec_inps, dec_hids)
+        # assumptions:
+        #   1) the batch.resp_seq[0, :] does not start with <bos>
+        #   2) the batch.resp_seq ends with <eos>
+        outp_probs = torch.zeros((batch_size, batch.max_resp_len), device=device)
+
+        for t in range(0, batch.max_resp_len):
+
+            word_probs, dec_hids, _ = self.dec(ctx_outs, dec_inps, dec_hids, chars=batch.resp_chars)
 
             # expected output;; log probability for these indices should be high
-            expct_word_idx = batch.y_seqs[:, t].view(batch_size, 1)
+            expct_word_idx = batch.resp_seqs[:, t].view(batch_size, 1)
             expct_word_log_probs = word_probs.gather(dim=1, index=expct_word_idx)
-            outp_probs[t - 1] = expct_word_log_probs.squeeze()
+            outp_probs[:, t] = expct_word_log_probs.squeeze()
 
             # Randomly switch between gold and the prediction next word
             if random.choice((False, True)):
@@ -258,49 +364,40 @@ class Seq2Seq(NMTModel):
             else:
                 pred_word_idx = word_probs.argmax(dim=1)
                 dec_inps = pred_word_idx.view(batch_size, 1)
-        return outp_probs.t()
+        return outp_probs
 
     @staticmethod
-    def make_model(src_lang, tgt_lang, src_vocab: int, tgt_vocab: int, emb_size: int = 300,
-                   hid_size: int = 300, n_layers: int = 2, attention=False, dropout=0.33,
-                   tied_emb: Optional[str] = None):
+    def make_model(text_vocab: int, char_vocab: int, text_emb_size: int = 300, char_emb_size=50,
+                   hid_size: int = 300, n_layers: int = 2, dropout=0.2):
         args = {
-            'src_lang': src_lang,
-            'tgt_lang': tgt_lang,
-            'src_vocab': src_vocab,
-            'tgt_vocab': tgt_vocab,
-            'emb_size': emb_size,
+            'text_vocab': text_vocab,
+            'char_vocab': char_vocab,
+            'text_emb_size': text_emb_size,
+            'char_emb_size': char_emb_size,
             'hid_size': hid_size,
             'n_layers': n_layers,
-            'attention': attention,
             'dropout': dropout,
-            'tied_emb': tied_emb
         }
-        src_embedder = Embedder(src_lang, src_vocab, emb_size)
-        tgt_embedder = Embedder(tgt_lang, tgt_vocab, emb_size)
-        tgt_generator = Generator(tgt_lang, vec_size=hid_size, vocab_size=tgt_vocab)
-        if tied_emb:
-            assert src_vocab == tgt_vocab
-            if tied_emb == 'three-way':
-                log.info('Tying embedding three way : SrcIn == TgtIn == TgtOut')
-                src_embedder.weight = tgt_embedder.weight
-                tgt_generator.proj.weight = tgt_embedder.weight
-            elif tied_emb == 'two-way':
-                log.info('Tying embedding two way : SrcIn == TgtIn')
-                src_embedder.weight = tgt_embedder.weight
-            else:
-                raise Exception('Invalid argument to tied_emb; Known: {three-way, two-way}')
+        text_embedder = Embedder('text', text_vocab, text_emb_size)
+        char_embedder = Embedder('char', char_vocab, char_emb_size)
+        tgt_generator = Generator('text', vec_size=hid_size, vocab_size=text_vocab)
 
-        enc = SeqEncoder(src_embedder, hid_size, n_layers=n_layers, bidirectional=True,
-                         dropout=dropout)
+        utter_enc = UtteranceEncoder(text_embedder, char_embedder, hid_size, n_layers=n_layers,
+                                     bidirectional=True, dropout=dropout)
+        chat_enc = ContextEncoder(utter_enc.out_size, hid_size, n_layers=n_layers,
+                                  bidirectional=True, dropout=dropout)
+
+        """
         if attention:
             log.info("Using attention models for decoding")
             dec = AttnSeqDecoder(tgt_embedder, tgt_generator, n_layers=n_layers, dropout=dropout)
         else:
-            log.info("NOT Using attention models for decoding")
-            dec = SeqDecoder(tgt_embedder, tgt_generator, n_layers=n_layers, dropout=dropout)
+        """
+        log.info("NOT Using attention models for decoding")
+        dec = SeqDecoder(text_embedder, char_embedder, tgt_generator, n_layers=n_layers,
+                         dropout=dropout)
 
-        model = Seq2Seq(enc, dec)
+        model = HRED(utter_enc, chat_enc, dec)
         # Initialize parameters with Glorot / fan_avg.
         for p in model.parameters():
             if p.dim() > 1:
@@ -330,11 +427,11 @@ class SimpleLossFunction:
         seq_length_expand = lengths.unsqueeze(1).expand_as(seq_range_expand)
         return seq_range_expand < seq_length_expand  # 0 if padding, 1 otherwise
 
-    def __call__(self, log_probs, batch: Batch, train_mode: bool) -> float:
+    def __call__(self, log_probs, batch: DialogMiniBatch, train_mode: bool) -> float:
         per_tok_loss = -log_probs
 
-        tok_mask = self.sequence_mask(batch.y_len, batch.max_y_len - 1)
-        norm = batch.y_toks
+        tok_mask = self.sequence_mask(batch.resp_lens, batch.max_resp_len)
+        norm = batch.tot_resp_toks.float()
         loss = (per_tok_loss * tok_mask.float()).sum().float() / norm
         if train_mode:
             loss.backward()
@@ -343,59 +440,59 @@ class SimpleLossFunction:
         return loss.item() * norm
 
 
-class SteppedSeq2SeqTrainer(SteppedTrainer):
+class SteppedHREDTrainer(SteppedTrainer):
+    """
+    A trainer for HRED model
+    based on Optimizer steps (not the epochs)
+    """
 
     def __init__(self, exp: Experiment,
-                 model: Optional[Seq2Seq] = None,
+                 model: Optional[HRED] = None,
                  optim: str = 'ADAM',
                  **optim_args):
-        super().__init__(exp, model, model_factory=Seq2Seq.make_model, optim=optim, **optim_args)
+        super().__init__(exp, model, model_factory=HRED.make_model, optim=optim, **optim_args)
         self.loss_func = SimpleLossFunction(optim=self.opt)
 
-    def run_valid_epoch(self, data_iter: BatchIterable) -> float:
+    def run_valid_epoch(self, data_iter: Iterator[DialogMiniBatch]) -> float:
         state = TrainerState(self.model, -1)
-        with tqdm(data_iter, total=data_iter.num_batches, unit='batch') as data_bar:
-            for i, batch in enumerate(data_bar):
-                batch = batch.to(device)
+        with tqdm(enumerate(data_iter), unit='batch', leave=True, dynamic_ncols=True) as data_bar:
+            for i, batch in data_bar:
                 # Step clear gradients
                 self.model.zero_grad()
                 # Step Run forward pass.
                 outp_log_probs = self.model(batch)
                 loss = self.loss_func(outp_log_probs, batch, train_mode=False)
-                bar_msg, _ = state.step(batch.y_toks, loss)
+                bar_msg, _ = state.step(batch.tot_resp_toks, loss)
                 data_bar.set_postfix_str(bar_msg, refresh=False)
-                del batch
         return state.running_loss()
 
-    def train(self, steps: int, check_point: int, batch_size: int, fine_tune=False,
+    def train(self, steps: int, check_point: int, fine_tune=False,
               check_pt_callback: Optional[Callable] = None, **args):
-        log.info(f'Going to train for {steps} steps; batch_size={batch_size}; '
+        log.info(f'Going to train for {steps} steps; '
                  f'check point size:{check_point}; fine tune={fine_tune}')
         keep_models = args.get('keep_models', 4)  # keep last _ models and delete the old
 
         if steps <= self.start_step:
             raise Exception(f'The model was already trained to {self.start_step} steps. '
                             f'Please increase the steps or clear the existing models')
-        train_data = self.exp.get_train_data(batch_size=batch_size,
-                                             steps=steps - self.start_step,
-                                             shuffle=True, batch_first=True, fine_tune=fine_tune)
-        val_data = self.exp.get_val_data(batch_size, shuffle=False, batch_first=True)
+
+        train_data = self.exp.get_train_data(loop_steps=steps - self.start_step)
+        val_data = self.exp.get_val_data()
 
         train_state = TrainerState(self.model, check_point=check_point)
         train_state.train_mode(True)
         with tqdm(train_data, initial=self.start_step, total=steps, unit='batch') as data_bar:
             for batch in data_bar:
-                batch = batch.to(device)
                 # Step clear gradients
                 self.model.zero_grad()
+
                 # Step Run forward pass.
                 outp_log_probs = self.model(batch)
-
                 loss = self.loss_func(outp_log_probs, batch, True)
                 self.tbd.add_scalars('training', {'step_loss': loss,
                                                   'learn_rate': self.opt.curr_lr},
                                      self.opt.curr_step)
-                bar_msg, is_check_pt = train_state.step(batch.y_toks, loss)
+                bar_msg, is_check_pt = train_state.step(batch.tot_resp_toks, loss)
                 bar_msg += f', LR={self.opt.curr_lr:g}'
                 data_bar.set_postfix_str(bar_msg, refresh=False)
 
@@ -412,44 +509,32 @@ class SteppedSeq2SeqTrainer(SteppedTrainer):
 
 
 def __test_seq2seq_model__():
-    from virtchar.tool.dummy import DummyExperiment
-    from virtchar.use.decoder import Decoder
+    work_dir = '/Users/tg/work/phd/cs644/project/virtchar/tmp.work'
+    exp = Experiment(work_dir, config={'model_type': 'HRED'}, read_only=False)
+    text_vocab = len(exp.text_field)
+    char_vocab = len(exp.char_field)
 
-    vocab_size = 20
-    batch_size = 30
-    exp = DummyExperiment("tmp.work", config={'model_type': 'seq'
-                                                            '2seq'},
-                          read_only=True, vocab_size=vocab_size)
     emb_size = 100
-    model_dim = 100
-    steps = 2000
-    check_pt = 100
+    char_emb_size = 50
 
-    assert 2 == Batch.bos_val
-    src = tensor([[2,  4,  5,  6,  7, 8, 9, 10, 11, 12, 13],
-                  [2, 13, 12, 11, 10, 9, 8,  7,  6,  5,  4]])
-    src_lens = tensor([src.size(1)] * src.size(0))
+    step_size = 50
+    model_dim = 100
+
+    steps = 2000
+    check_pt = 300
 
     for reverse in (False,):
         # train two models;
         #  first, just copy the numbers, i.e. y = x
         #  second, reverse the numbers y=(V + reserved - x)
-        log.info(f"====== REVERSE={reverse}; VOCAB={vocab_size}======")
-        model, args = Seq2Seq.make_model('DummyA', 'DummyB', vocab_size, vocab_size, attention=True,
-                                         emb_size=emb_size, hid_size=model_dim, n_layers=1)
-        trainer = SteppedSeq2SeqTrainer(exp=exp, model=model, lr=0.01, warmup_steps=500)
-        decr = Decoder.new(exp, model)
+        log.info(f"====== REVERSE={reverse}; VOCAB={text_vocab}, Characters:{char_vocab}======")
 
-        def check_pt_callback(**args):
-            res = decr.greedy_decode(src, src_lens, max_len=17)
-            for score, seq in res:
-                log.info(f'{score:.4f} :: {seq}')
-
-        trainer.train(steps=steps, check_point=check_pt, batch_size=batch_size,
-                      check_pt_callback=check_pt_callback)
+        model, args = HRED.make_model(text_vocab=text_vocab, char_vocab=char_vocab,
+                                      text_emb_size=emb_size, char_emb_size=char_emb_size,
+                                      hid_size=model_dim, n_layers=1)
+        trainer = SteppedHREDTrainer(exp=exp, model=model, lr=0.01, warmup_steps=500)
+        trainer.train(steps=steps, step_size=step_size, check_point=check_pt)
 
 
 if __name__ == '__main__':
     __test_seq2seq_model__()
-
-
