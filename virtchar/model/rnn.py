@@ -141,20 +141,6 @@ class UtteranceEncoder(BaseEncoder):
         sent_repr = self.compressor(torch.cat([lnhn, lncn], dim=-1))
         return outputs, sent_repr
 
-    def to_dec_state(self, enc_state, dec_layers=None):
-        lnhn, lncn = self.get_last_layer_last_step(enc_state)
-        # lnhn and lncn hold compact representation
-
-        if not dec_layers:
-            dec_layers = self.n_layers
-        # duplicate for decoder layers
-        return (lnhn.expand(dec_layers, *lnhn.shape).contiguous(),
-                lncn.expand(dec_layers, *lncn.shape).contiguous())
-
-    def to_sent_repr(self, enc_state):
-        lnhn, lncn = self.get_last_layer_last_step(enc_state)
-        return lnhn + lncn
-
 
 class ContextEncoder(BaseEncoder):
     # also read it as ParagraphEncoder
@@ -255,6 +241,8 @@ class DotAttn(nn.Module):
 
 
 class AttnSeqDecoder(SeqDecoder):
+
+    # FIXME: this is not tested
     def __init__(self, text_emb: Embedder, char_emb: Embedder, generator: Generator, n_layers: int,
                  dropout: float = 0.5):
         super(AttnSeqDecoder, self).__init__(text_emb=text_emb, char_emb=char_emb,
