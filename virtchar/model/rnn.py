@@ -1,5 +1,5 @@
 import random
-from typing import Optional, Callable, Iterator
+from typing import Optional, Callable, Iterator, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -49,7 +49,7 @@ class Generator(nn.Module):
 
 class BaseEncoder(nn.Module):
 
-    def __init__(self, inp_size, out_size, n_layers, bidirectional, dropout=0.5):
+    def __init__(self, inp_size, out_size, n_layers, bidirectional, dropout=0.5, rnn_type=nn.GRU):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.inp_size = inp_size
@@ -61,9 +61,10 @@ class BaseEncoder(nn.Module):
         if self.bidirectional:
             assert self.out_size % 2 == 0
             out_size = out_size // 2
-        self.rnn_node = nn.LSTM(self.inp_size, out_size, num_layers=self.n_layers,
-                                bidirectional=self.bidirectional, batch_first=True,
-                                dropout=dropout if n_layers > 1 else 0)
+        self.rnn_type = rnn_type
+        self.rnn_node = rnn_type(self.inp_size, out_size, num_layers=self.n_layers,
+                                 bidirectional=self.bidirectional, batch_first=True,
+                                 dropout=dropout if n_layers > 1 else 0)
 
     def forward(self, embedded, seq_lens, hidden=None):
         # assert not args     # must be empty
@@ -80,20 +81,31 @@ class BaseEncoder(nn.Module):
                                                                    padding_value=PAD_TOK_IDX)
         return outputs, hidden
 
-    def get_last_layer_last_step(self, enc_state):
+    def get_last_layer_last_step(self, enc_state) -> Tuple[Tensor, Optional[Tensor]]:
         # get the last layer's last time step output
         # lnhn is layer n hidden n which is last layer last hidden. similarly lncn
-        hns, cns = enc_state
+        hns, cns = enc_state if self.has_context_gate else (enc_state, None)
+
+        # cns (i.e. context gate can be missing, for example GRU doesnt have context out)
+        lncn = None
+
         if self.bidirectional:
             # cat bidirectional
             lnhn = hns.view(self.n_layers, 2, hns.shape[1], hns.shape[-1])[-1]
             lnhn = torch.cat([lnhn[0], lnhn[1]], dim=1)
-            lncn = cns.view(self.n_layers, 2, cns.shape[1], cns.shape[-1])[-1]
-            lncn = torch.cat([lncn[0], lncn[1]], dim=1)
+
+            if self.has_context_gate:
+                lncn = cns.view(self.n_layers, 2, cns.shape[1], cns.shape[-1])[-1]
+                lncn = torch.cat([lncn[0], lncn[1]], dim=1)
         else:
             lnhn = hns.view(self.n_layers, hns.shape[1], hns.shape[-1])[-1]
-            lncn = cns.view(self.n_layers, cns.shape[1], cns.shape[-1])[-1]
+            if self.has_context_gate:
+                lncn = cns.view(self.n_layers, cns.shape[1], cns.shape[-1])[-1]
         return lnhn, lncn
+
+    @property
+    def has_context_gate(self):
+        return self.rnn_type == nn.LSTM
 
 
 class UtteranceEncoder(BaseEncoder):
@@ -104,21 +116,21 @@ class UtteranceEncoder(BaseEncoder):
                  out_size: int,
                  n_layers: int,
                  bidirectional: bool = True,
-                 dropout=0.2):
-
+                 dropout=0.2,
+                 rnn_type=nn.GRU):
         self.emb_size = text_emb.emb_size + char_emb.emb_size
         super().__init__(inp_size=self.emb_size, out_size=out_size, n_layers=n_layers,
-                         bidirectional=bidirectional, dropout=dropout)
+                         bidirectional=bidirectional, dropout=dropout, rnn_type=rnn_type)
 
         # First level, deals with text; so embeddings are needed
         self.text_emb = text_emb
         self.char_emb = char_emb
 
-        # LSTMs produce h_t and c_t, we are going to compress them
-        self.compressor = nn.Linear(self.out_size * 2, self.out_size)
+        if self.has_context_gate:
+            # LSTMs produce h_t and c_t, we are going to compress them
+            self.compressor = nn.Linear(self.out_size * 2, self.out_size)
 
     def forward(self, utters: Tensor, utter_lens: Tensor, chars: Tensor = None, hidden=None):
-
         batch_size = utters.shape[0]
         if chars is not None:
             assert batch_size == chars.shape[0]
@@ -138,7 +150,10 @@ class UtteranceEncoder(BaseEncoder):
         # Sum bidirectional outputs
         # outputs = outputs[:, :, :self.hid_size] + outputs[:, :, self.hid_size:]
         lnhn, lncn = self.get_last_layer_last_step(hidden_state)
-        sent_repr = self.compressor(torch.cat([lnhn, lncn], dim=-1))
+        if self.has_context_gate:
+            sent_repr = self.compressor(torch.cat([lnhn, lncn], dim=-1))
+        else:
+            sent_repr = lnhn
         return outputs, sent_repr
 
 
@@ -151,9 +166,11 @@ class ContextEncoder(BaseEncoder):
                  n_layers: int,
                  bidirectional: bool = True,
                  dec_layers: Optional[int] = None,
-                 dropout=0.2):
+                 dropout=0.2,
+                 rnn_type=nn.GRU):
         super().__init__(inp_size=inp_size, out_size=out_size, n_layers=n_layers,
-                         bidirectional=bidirectional, dropout=dropout)
+                         bidirectional=bidirectional, dropout=dropout,
+                         rnn_type=rnn_type)
         self.dec_layers = dec_layers if dec_layers else n_layers
 
     def forward(self, embedded: Tensor, seq_lens: Tensor, hidden=None):
@@ -162,15 +179,18 @@ class ContextEncoder(BaseEncoder):
 
         # duplicate it decoder layers
         lnhn = lnhn.expand(self.dec_layers, *lnhn.shape).contiguous()
-        lncn = lncn.expand(self.dec_layers, *lncn.shape).contiguous()
-
-        return outputs, (lnhn, lncn)
+        if self.has_context_gate:
+            lncn = lncn.expand(self.dec_layers, *lncn.shape).contiguous()
+            return outputs, (lnhn, lncn)
+        else:
+            assert lncn is None
+            return outputs, lnhn
 
 
 class SeqDecoder(nn.Module):
 
     def __init__(self, text_emb: Embedder, char_emb: Embedder, generator: Generator,
-                 n_layers: int, dropout=0.5):
+                 n_layers: int, dropout=0.5, rnn_type=nn.GRU):
         super(SeqDecoder, self).__init__()
         self.text_emb = text_emb
         self.char_emb = char_emb
@@ -179,10 +199,11 @@ class SeqDecoder(nn.Module):
         self.n_layers = n_layers
         self.emb_size = self.text_emb.emb_size + self.char_emb.emb_size
         self.hid_size = self.generator.vec_size
-        self.rnn_node = nn.LSTM(self.emb_size, self.hid_size,
-                                num_layers=self.n_layers,
-                                bidirectional=False, batch_first=True,
-                                dropout=dropout if n_layers > 1 else 0)
+        self.rnn_type = rnn_type
+        self.rnn_node = rnn_type(self.emb_size, self.hid_size,
+                                 num_layers=self.n_layers,
+                                 bidirectional=False, batch_first=True,
+                                 dropout=dropout if n_layers > 1 else 0)
 
     def embed_prev(self, prev_out, chars):
         # Get the embedding of the current input word (last output word)
@@ -243,13 +264,13 @@ class DotAttn(nn.Module):
 class AttnSeqDecoder(SeqDecoder):
 
     def __init__(self, text_emb: Embedder, char_emb: Embedder, generator: Generator, n_layers: int,
-                 dropout: float = 0.5, attention=None):
+                 dropout: float = 0.5, attention=None, rnn_type=nn.GRU):
         super(AttnSeqDecoder, self).__init__(text_emb=text_emb, char_emb=char_emb,
                                              generator=generator, n_layers=n_layers,
-                                             dropout=dropout)
+                                             dropout=dropout, rnn_type=rnn_type)
         self.attn_type = attention
 
-        assert attention == 'dot'       # only dot is supported at the moment
+        assert attention == 'dot'  # only dot is supported at the moment
         self.attn = DotAttn(self.hid_size)
         self.merge = nn.Linear(self.hid_size + self.attn.out_size, self.hid_size)
 
@@ -316,7 +337,8 @@ class HRED(DialogModel):
         assert 2 == len(sent_reprs.shape)  # its a 2d tensor
 
         # Inserting 0s at the 0th row, so we can pick rows based on indices, where index=0 is pad
-        padded_sent_repr = torch.cat([torch.zeros(1, sent_reprs.shape[1], device=device), sent_reprs], dim=0)
+        padded_sent_repr = torch.cat(
+            [torch.zeros(1, sent_reprs.shape[1], device=device), sent_reprs], dim=0)
 
         # index_select works with vector, so we flatten and then restore
         chat_input = torch.index_select(padded_sent_repr, 0, chat_ctx_idx.view(-1))
@@ -357,7 +379,8 @@ class HRED(DialogModel):
 
     @staticmethod
     def make_model(text_vocab: int, char_vocab: int, text_emb_size: int = 300, char_emb_size=50,
-                   hid_size: int = 300, n_layers: int = 2, dropout=0.2, attention='dot'):
+                   hid_size: int = 300, n_layers: int = 2, dropout=0.2, attention='dot',
+                   rnn_type='GRU'):
         args = {
             'text_vocab': text_vocab,
             'char_vocab': char_vocab,
@@ -366,25 +389,32 @@ class HRED(DialogModel):
             'hid_size': hid_size,
             'n_layers': n_layers,
             'dropout': dropout,
-            'attention': attention
+            'attention': attention,
+            'rnn_type': rnn_type
         }
+        log.info(f"RNN type={rnn_type}")
+        rnn_type = {
+            'GRU': nn.GRU,
+            'LSTM': nn.LSTM
+        }[rnn_type]
         text_embedder = Embedder('text', text_vocab, text_emb_size)
         char_embedder = Embedder('char', char_vocab, char_emb_size)
         text_generator = Generator('text', vec_size=hid_size, vocab_size=text_vocab)
 
         utter_enc = UtteranceEncoder(text_embedder, char_embedder, hid_size, n_layers=n_layers,
-                                     bidirectional=True, dropout=dropout)
+                                     bidirectional=True, dropout=dropout, rnn_type=rnn_type)
         chat_enc = ContextEncoder(utter_enc.out_size, hid_size, n_layers=n_layers,
-                                  bidirectional=True, dropout=dropout)
+                                  bidirectional=True, dropout=dropout, rnn_type=rnn_type)
 
         if attention:
             log.info(f"Using attention={attention} decoder")
             dec = AttnSeqDecoder(text_embedder, char_embedder, text_generator,
-                                 n_layers=n_layers, dropout=dropout, attention=attention)
+                                 n_layers=n_layers, dropout=dropout, attention=attention,
+                                 rnn_type=rnn_type)
         else:
             log.info("NOT Using attention model in decoder")
             dec = SeqDecoder(text_embedder, char_embedder, text_generator, n_layers=n_layers,
-                             dropout=dropout)
+                             dropout=dropout, rnn_type=rnn_type)
 
         model = HRED(utter_enc, chat_enc, dec)
         # Initialize parameters with Glorot / fan_avg.
@@ -509,7 +539,7 @@ def __test_seq2seq_model__():
     model_dim = 100
 
     steps = 2000
-    check_pt = 300
+    check_pt = 100
 
     log.info(f"====== VOCAB={text_vocab}, Characters:{char_vocab}======")
     model, args = HRED.make_model(text_vocab=text_vocab, char_vocab=char_vocab,
