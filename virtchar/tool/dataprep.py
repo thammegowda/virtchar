@@ -204,16 +204,28 @@ class Dialog:
     def __iter__(self):
         return self.chat
 
-    def as_mini_chats(self, min_ctx: int, max_ctx: int):
+    def as_mini_chats(self, min_ctx: int, max_ctx: int, model_chars: Optional[Set] = None) -> \
+            Iterator[ChatRec]:
+        """
+
+        :param min_ctx: minimum context size for the response
+        :param max_ctx: maximum context size for the response
+        :param model_chars: set of character whose responses you are trying to model
+            if None is supplied (default), no filtering will be performed
+        :return:
+        """
         assert 0 < min_ctx <= max_ctx
 
         for idx in range(len(self)):
             start = max(0, idx - max_ctx)
             ctx = self.chat[start: idx]  # until this idx
+            resp = self.chat[idx]
+            if model_chars and resp.char not in model_chars:
+                continue
             while len(ctx) >= min_ctx:
                 # shallow copy.copy is intentional,
                 #  copy.deepcopy mess the id based hashing, so don't do that
-                yield ChatRec(copy.copy(ctx), self.chat[idx])
+                yield ChatRec(copy.copy(ctx), resp)
                 # Slide the window, by removing the left most
                 ctx.pop(0)
 
@@ -500,7 +512,8 @@ class OrderedSet(dict):
 class DialogBatchReader:
 
     def __init__(self, reader: DialogReader, min_ctx: int = 2, max_ctx: int = 10,
-                 max_utters: int = 10, max_dialogs: int = 20, sort_desc: bool = True, pad=True):
+                 max_utters: int = 10, max_dialogs: int = 20, sort_desc: bool = True,
+                 pad=True, model_chars: Optional[Set] = None):
         assert 0 < min_ctx <= max_ctx
         assert 0 < max_utters <= max_dialogs
 
@@ -511,6 +524,7 @@ class DialogBatchReader:
         self.max_dialogs = max_dialogs
         self.sort_desc = sort_desc
         self.pad = pad
+        self.model_chars = model_chars
 
     def __iter__(self):
         count = 0
@@ -524,7 +538,8 @@ class DialogBatchReader:
             return self.max_dialogs - len(chats)
 
         for dialog in self.reader:
-            for chat in dialog.as_mini_chats(min_ctx=self.min_ctx, max_ctx=self.max_ctx):
+            for chat in dialog.as_mini_chats(min_ctx=self.min_ctx, max_ctx=self.max_ctx,
+                                             model_chars=self.model_chars):
                 utters.maybe_update(chat.context)  # this might exceed max_utters, but that's okay
                 utters.maybe_add(chat.response)
                 chats.append(chat)

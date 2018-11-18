@@ -464,7 +464,6 @@ class SteppedHREDTrainer(SteppedTrainer):
         if steps <= self.start_step:
             raise Exception(f'The model was already trained to {self.start_step} steps. '
                             f'Please increase the steps or clear the existing models')
-
         train_data = self.exp.get_train_data(loop_steps=steps - self.start_step)
         val_data = self.exp.get_val_data()
 
@@ -499,7 +498,7 @@ class SteppedHREDTrainer(SteppedTrainer):
 
 def __test_seq2seq_model__():
     work_dir = '/Users/tg/work/phd/cs644/project/virtchar/tmp.work'
-    exp = Experiment(work_dir, config={'model_type': 'HRED'}, read_only=False)
+    exp = Experiment(work_dir, read_only=True)
     text_vocab = len(exp.text_field)
     char_vocab = len(exp.char_field)
 
@@ -512,17 +511,12 @@ def __test_seq2seq_model__():
     steps = 2000
     check_pt = 300
 
-    for reverse in (False,):
-        # train two models;
-        #  first, just copy the numbers, i.e. y = x
-        #  second, reverse the numbers y=(V + reserved - x)
-        log.info(f"====== REVERSE={reverse}; VOCAB={text_vocab}, Characters:{char_vocab}======")
-
-        model, args = HRED.make_model(text_vocab=text_vocab, char_vocab=char_vocab,
-                                      text_emb_size=emb_size, char_emb_size=char_emb_size,
-                                      hid_size=model_dim, n_layers=1)
-        trainer = SteppedHREDTrainer(exp=exp, model=model, lr=0.01, warmup_steps=500)
-        trainer.train(steps=steps, step_size=step_size, check_point=check_pt)
+    log.info(f"====== VOCAB={text_vocab}, Characters:{char_vocab}======")
+    model, args = HRED.make_model(text_vocab=text_vocab, char_vocab=char_vocab,
+                                  text_emb_size=emb_size, char_emb_size=char_emb_size,
+                                  hid_size=model_dim, n_layers=1)
+    trainer = SteppedHREDTrainer(exp=exp, model=model, lr=0.01, warmup_steps=500)
+    trainer.train(steps=steps, step_size=step_size, check_point=check_pt)
 
 
 if __name__ == '__main__':

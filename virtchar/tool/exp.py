@@ -2,14 +2,14 @@ import yaml
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Iterator, List, Tuple, Union, Any
+from typing import Optional, Dict, Iterator, List, Tuple, Union, Any, Set
 import torch
 import random
 
 from virtchar import log, load_conf
 from virtchar.tool.dataprep import (
     RawRecord, DialogRecord, Field, LookupField, RawDialogReader, Dialog,
-                                    DialogReader, DialogBatchReader, DialogMiniBatch, LoopingIterable)
+    DialogReader, DialogBatchReader, DialogMiniBatch, LoopingIterable)
 from virtchar.utils import IO
 
 
@@ -45,7 +45,7 @@ class DialogExperiment:
             config = load_conf(config)
         self.config = config if config else load_conf(self._config_file)
 
-        self.text_field = Field(str(self._text_field_file))\
+        self.text_field = Field(str(self._text_field_file)) \
             if self._text_field_file.exists() else None
         self.char_field = LookupField(str(self._char_field_file)) \
             if self._char_field_file.exists() else None
@@ -155,7 +155,7 @@ class DialogExperiment:
         self.write_dialogs(samples, self.samples_file)
 
     @staticmethod
-    def pick_samples(path: Path, n_samples: int, min_len: int=6, max_len: int=15):
+    def pick_samples(path: Path, n_samples: int, min_len: int = 6, max_len: int = 15):
         dialogs = list(RawDialogReader(path=path))
         dialogs = [d for d in dialogs if min_len <= len(d) <= max_len]
         random.shuffle(dialogs)
@@ -353,9 +353,41 @@ class DialogExperiment:
             inp_file = self.finetune_file
 
         reader = DialogReader(inp_file, char_field=self.char_field)
-        train_data = DialogBatchReader(reader)
+
+        train_data = DialogBatchReader(reader,
+                                       min_ctx=self.min_ctx,
+                                       max_ctx=self.max_ctx,
+                                       max_dialogs=self.max_utters,
+                                       max_utters=self.max_utters,
+                                       model_chars=self.model_characters)
         return LoopingIterable(train_data, total=loop_steps) if loop_steps > 0 else train_data
 
     def get_val_data(self) -> Iterator[DialogMiniBatch]:
         reader = DialogReader(self.valid_file, char_field=self.char_field)
-        return DialogBatchReader(reader)
+        return DialogBatchReader(reader,
+                                 min_ctx=self.min_ctx,
+                                 max_ctx=self.max_ctx,
+                                 max_dialogs=self.max_utters,
+                                 max_utters=self.max_utters,
+                                 model_chars=self.model_characters)
+
+    @property
+    def model_characters(self) -> Set[int]:
+        char_names = self.config['trainer']['characters']
+        return set([self.char_field.encode_as_id(c) for c in char_names])
+
+    @property
+    def min_ctx(self):
+        return self.config['trainer']['min_ctx']
+
+    @property
+    def max_ctx(self):
+        return self.config['trainer']['max_ctx']
+
+    @property
+    def max_dialogs(self):
+        return self.config['trainer']['max_dialogs']
+
+    @property
+    def max_utters(self):
+        return self.config['trainer']['max_utters']

@@ -436,9 +436,8 @@ class Decoder:
                 print_state = True
 
     def decode_dialogs(self, dialogs: Iterator[Dialog], out, **args):
-        # Todo: get these form  args
-        min_ctx, max_ctx = 3, 6
-        test_chars = ('Monica', 'Chandler')
+        min_ctx, max_ctx = self.exp.min_ctx, self.exp.max_ctx
+        test_chars = self.exp.model_characters
 
         assert all(x in self.char_vocab for x in test_chars)
         test_chars = [self.char_vocab[x] for x in test_chars]

@@ -7,7 +7,8 @@ prep:
   pieces: bpe
   max_types: 8000
   max_seq_len: 80
-  no_split_toks:  # do not split these tokens
+  no_split_toks:
+  # do not split these tokens in the utterances when running BPE word splitter
   - Ross
   - Rachel
   - Monica
@@ -15,11 +16,11 @@ prep:
   - Phoebe
   - Joey
   - Gunter
-  characters:
-  - <pad>       # let the zero be not assigned, because zero is a special number
+  characters:   # for character embedding
+  - <pad>       # let the zero be not assigned, because zero is toooo special to be assigned to someone
   - <unk>       # all other characters go to <unk>
-  - <scene>     # if we chose to treat event in dialog turns
-  - <event>     # if we chose to use event information in dialog turns
+  - <scene>     # if we choose to treat event in dialog turns
+  - <event>     # if we choose to use event information in dialog turns
   - Ross
   - Rachel
   - Monica
@@ -27,3 +28,19 @@ prep:
   - Phoebe
   - Joey
   - Gunter    # one low appearance character to test low-resource
+
+trainer:
+  characters:
+  # Whose utterances should be used to optimize the end to end loss
+  # definitely exclude <scene> <event> <unk>
+  - Ross
+  - Rachel
+  - Monica
+  - Chandler
+  - Phoebe
+  - Joey
+  - Gunter
+  min_ctx: 2
+  max_ctx: 10
+  max_utters: 100
+  max_chats: 100
