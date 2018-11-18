@@ -9,7 +9,6 @@ from virtchar.model import DialogModel
 from virtchar.utils import Optims, IO
 from virtchar.tool.dataprep import DialogMiniBatch, RawDialogReader
 
-
 from abc import abstractmethod
 from typing import Optional, Callable, Iterator
 from dataclasses import dataclass
@@ -55,7 +54,8 @@ class NoamOpt:
         "Implement `lrate` above"
         if step is None:
             step = self._step
-        return self.factor * (self.model_size ** (-0.5) * min(step ** (-0.5), step * self.warmup ** (-1.5)))
+        return self.factor * (
+                    self.model_size ** (-0.5) * min(step ** (-0.5), step * self.warmup ** (-1.5)))
 
     @staticmethod
     def get_std_opt(model):
@@ -187,7 +187,9 @@ class SteppedTrainer:
             self.exp.persist_state()
         self.samples = None
         if self.exp.samples_file.exists():
-            self.samples_raw = list(RawDialogReader(self.exp.samples_file))
+            self.samples = list(RawDialogReader(self.exp.samples_file,
+                                                text_field=self.exp.text_field,
+                                                char_field=self.exp.char_field))
             from virtchar.use.decoder import Decoder
             self.decoder = Decoder.new(self.exp, self.model)
 
@@ -202,19 +204,11 @@ class SteppedTrainer:
         if not self.samples:
             log.info("No samples are chosen by the experiment")
             return
-        log.error("show_samples not implemented")
-        return
-        # FIXME:
-        for i, (raw_dialog) in enumerate(self.samples_raw):
-            step_num = self.opt.curr_step
+        self.decoder.decode_dialogs(self.samples, out=None, beam_size=beam_size,
+                                    num_hyp=num_hyp, max_len=max_len)
 
-            result = self.decoder.gene(line, beam_size=beam_size, num_hyp=num_hyp, max_len=max_len)
-            outs = [f"hyp{j}: {score:.3f} :: {out}" for j, (score, out) in enumerate(result)]
-            self.tbd.add_text(f'sample/{i}', " || ".join(outs), step_num)
-            outs = '\n'.join(outs)
-            log.info(f"==={i}===\nSRC:{line}\nREF:{ref}\n{outs}")
-
-    def make_check_point(self, val_data: Iterator[DialogMiniBatch], train_loss: float, keep_models: int):
+    def make_check_point(self, val_data: Iterator[DialogMiniBatch], train_loss: float,
+                         keep_models: int):
         """
         Check point the model
         :param val_data: validation data to obtain validation score
@@ -257,4 +251,3 @@ class SteppedTrainer:
         :return:
         """
         pass
-
