@@ -667,10 +667,6 @@ tensor([[ 3,  0,  3,  2,  1],
         b.print()
 
 
-if __name__ == '__main__':
-    _test_batching_()
-
-
 class LoopingIterable:
     """
     An iterable that keeps looping until a specified count is reached
@@ -683,11 +679,13 @@ class LoopingIterable:
 
     def __iter__(self):
         self.count = 0  # reset
-        while True:
+        looping = True
+        while looping:
             for item in self.itr:
                 yield item
                 self.count += 1
                 if self.count >= self.total:
+                    looping = False
                     break
 
 
@@ -720,3 +718,7 @@ def subsequent_mask(size):
     mask = triu == 0
     mask = mask.unsqueeze(0)
     return mask
+
+
+if __name__ == '__main__':
+    _test_batching_()

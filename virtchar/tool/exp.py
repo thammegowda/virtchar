@@ -232,7 +232,7 @@ class DialogExperiment:
             return
         name = f'model_{step:05d}_{train_score:.6f}_{val_score:.6f}.pkl'
         path = self.model_dir / name
-        log.info(f"Saving epoch {step} to {path}")
+        log.info(f"Saving... step={step} to {path}")
         torch.save(model, str(path))
 
         for bad_model in self.list_models(sort='total_score', desc=False)[keep:]:
