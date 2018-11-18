@@ -242,18 +242,20 @@ class DotAttn(nn.Module):
 
 class AttnSeqDecoder(SeqDecoder):
 
-    # FIXME: this is not tested
     def __init__(self, text_emb: Embedder, char_emb: Embedder, generator: Generator, n_layers: int,
-                 dropout: float = 0.5):
+                 dropout: float = 0.5, attention=None):
         super(AttnSeqDecoder, self).__init__(text_emb=text_emb, char_emb=char_emb,
                                              generator=generator, n_layers=n_layers,
                                              dropout=dropout)
+        self.attn_type = attention
+
+        assert attention == 'dot'       # only dot is supported at the moment
         self.attn = DotAttn(self.hid_size)
         self.merge = nn.Linear(self.hid_size + self.attn.out_size, self.hid_size)
 
     def forward(self, enc_outs, prev_out, last_hidden, chars: Tensor = None, gen_probs=True):
         # Note: we run this one step at a time
-
+        assert len(enc_outs) == len(prev_out)
         # Get the embedding of the current input word (last output word)
         embedded = self.embed_prev(prev_out=prev_out, chars=chars)
 
@@ -272,7 +274,7 @@ class AttnSeqDecoder(SeqDecoder):
 
         # Attentional vector using the RNN hidden state and context vector
         # concatenated together (Luong eq. 5)
-        # rnn_output = rnn_output.squeeze(0)  # S=1 x B x N -> B x N
+
         context = context.squeeze(1)  # B x S=1 x N -> B x N
         concat_input = torch.cat((rnn_output, context), 1)
         concat_output = torch.tanh(self.merge(concat_input))
@@ -325,7 +327,6 @@ class HRED(DialogModel):
         return ctx_outs, dec_hids
 
     def forward(self, batch: DialogMiniBatch):
-        # TODO add attention
         ctx_outs, dec_hids = self.hiero_encode(batch.utters, batch.utter_lens, batch.chars,
                                                batch.chat_ctx_idx, batch.chat_lens)
 
@@ -356,7 +357,7 @@ class HRED(DialogModel):
 
     @staticmethod
     def make_model(text_vocab: int, char_vocab: int, text_emb_size: int = 300, char_emb_size=50,
-                   hid_size: int = 300, n_layers: int = 2, dropout=0.2):
+                   hid_size: int = 300, n_layers: int = 2, dropout=0.2, attention='dot'):
         args = {
             'text_vocab': text_vocab,
             'char_vocab': char_vocab,
@@ -365,25 +366,25 @@ class HRED(DialogModel):
             'hid_size': hid_size,
             'n_layers': n_layers,
             'dropout': dropout,
+            'attention': attention
         }
         text_embedder = Embedder('text', text_vocab, text_emb_size)
         char_embedder = Embedder('char', char_vocab, char_emb_size)
-        tgt_generator = Generator('text', vec_size=hid_size, vocab_size=text_vocab)
+        text_generator = Generator('text', vec_size=hid_size, vocab_size=text_vocab)
 
         utter_enc = UtteranceEncoder(text_embedder, char_embedder, hid_size, n_layers=n_layers,
                                      bidirectional=True, dropout=dropout)
         chat_enc = ContextEncoder(utter_enc.out_size, hid_size, n_layers=n_layers,
                                   bidirectional=True, dropout=dropout)
 
-        """
         if attention:
-            log.info("Using attention models for decoding")
-            dec = AttnSeqDecoder(tgt_embedder, tgt_generator, n_layers=n_layers, dropout=dropout)
+            log.info(f"Using attention={attention} decoder")
+            dec = AttnSeqDecoder(text_embedder, char_embedder, text_generator,
+                                 n_layers=n_layers, dropout=dropout, attention=attention)
         else:
-        """
-        log.info("NOT Using attention models for decoding")
-        dec = SeqDecoder(text_embedder, char_embedder, tgt_generator, n_layers=n_layers,
-                         dropout=dropout)
+            log.info("NOT Using attention model in decoder")
+            dec = SeqDecoder(text_embedder, char_embedder, text_generator, n_layers=n_layers,
+                             dropout=dropout)
 
         model = HRED(utter_enc, chat_enc, dec)
         # Initialize parameters with Glorot / fan_avg.
