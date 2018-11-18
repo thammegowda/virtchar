@@ -41,6 +41,6 @@ trainer:
   - Joey
   - Gunter
   min_ctx: 2
-  max_ctx: 10
+  max_ctx: 50
   max_utters: 100
   max_chats: 100

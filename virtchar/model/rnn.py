@@ -316,7 +316,7 @@ class HRED(DialogModel):
         assert 2 == len(sent_reprs.shape)  # its a 2d tensor
 
         # Inserting 0s at the 0th row, so we can pick rows based on indices, where index=0 is pad
-        padded_sent_repr = torch.cat([torch.zeros(1, sent_reprs.shape[1]), sent_reprs], dim=0)
+        padded_sent_repr = torch.cat([torch.zeros(1, sent_reprs.shape[1], device=device), sent_reprs], dim=0)
 
         # index_select works with vector, so we flatten and then restore
         chat_input = torch.index_select(padded_sent_repr, 0, chat_ctx_idx.view(-1))

@@ -1,6 +1,7 @@
 # Data -- dont check in data (not yet)
 data
 tmp*
+runs/
 
 
 
