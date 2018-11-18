@@ -156,7 +156,7 @@ class DialogExperiment:
 
     @staticmethod
     def pick_samples(path: Path, n_samples: int, min_len: int = 6, max_len: int = 15):
-        dialogs = list(RawDialogReader(path=path))
+        dialogs = list(RawDialogReader(path))
         dialogs = [d for d in dialogs if min_len <= len(d) <= max_len]
         random.shuffle(dialogs)
         return dialogs[:n_samples]
