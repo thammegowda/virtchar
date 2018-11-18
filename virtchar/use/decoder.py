@@ -438,9 +438,6 @@ class Decoder:
     def decode_dialogs(self, dialogs: Iterator[Dialog], out, **args):
         min_ctx, max_ctx = self.exp.min_ctx, self.exp.max_ctx
         test_chars = self.exp.model_characters
-
-        assert all(x in self.char_vocab for x in test_chars)
-        test_chars = [self.char_vocab[x] for x in test_chars]
         for i, dialog in enumerate(dialogs):
             chats: Iterator[ChatRec] = dialog.as_test_chats(min_ctx=min_ctx, max_ctx=max_ctx,
                                                             test_chars=test_chars)
