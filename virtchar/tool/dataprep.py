@@ -148,6 +148,8 @@ Terminology:
 class Utterance:
     char: Union[int, str]  # the character or speaker who said this
     text: Union[List[str], List[int]]  # the text content
+    raw_text: str = None       # In case you like to keep the original text line for inspection
+    raw_char: str = None       # in case you like to keep the original character name
     uid: Optional[str] = None  # In case you want to identify this by referencing to ext corpus
 
     def __len__(self):
@@ -193,8 +195,8 @@ class ChatRec:
 class Dialog:
     chat: List[Utterance] = field(default_factory=list)
 
-    def add_chat(self, char: Union[int, str], seq: Union[List[int], List[str]]):
-        self.chat.append(Utterance(char, seq))
+    def append(self, utter: Utterance):
+        self.chat.append(utter)
 
     def __len__(self):
         return len(self.chat)
@@ -281,20 +283,23 @@ class RawDialogReader:
                     count += 1
                     dialog = Dialog()
                 continue
-            char, text = line.split("\t")[-2:]
-            char = char.strip()
-            if char in self.reset_chars and len(dialog) > 0:
+            parts = line.split("\t")
+            raw_char, raw_text = parts[-2:]
+            uid = parts[0] if len(parts) > 0 else None
+            raw_char = raw_char.strip()
+            if raw_char in self.reset_chars and len(dialog) > 0:
                 yield dialog
                 count += 1
                 dialog = Dialog()
-
+            char = raw_char
             if self.char_field:
-                char = self.char_field.encode_as_id(char)
+                char = self.char_field.encode_as_id(raw_char)
             if self.text_field:
-                seq = self.text_field.encode_as_ids(text)
+                seq = self.text_field.encode_as_ids(raw_text)
             else:
-                seq = text.strip().split()
-            dialog.add_chat(char, seq)
+                seq = raw_text.strip().split()
+            utter = Utterance(char, seq, raw_text=raw_text, raw_char=raw_char, uid=uid)
+            dialog.append(utter)
         if len(dialog) > 0:
             count += 1
             yield dialog
@@ -307,6 +312,9 @@ class RawDialogReader:
 
 
 class DialogReader:
+    """
+    This one works with processed data i.e. word ids
+    """
 
     def __init__(self, path: Path, char_field: LookupField,
                  reset_on_scene=True, reset_on_event=True):
@@ -338,7 +346,8 @@ class DialogReader:
                     yield dialog
                     count += 1
                     dialog = Dialog()
-                dialog.add_chat(char, seq)
+
+                dialog.append(Utterance(char, seq))
             if len(dialog):
                 count += 1
                 yield dialog
@@ -435,14 +444,31 @@ class DialogMiniBatch:
         for i, chat in enumerate(batch.chats):
             self.chat_ctx_idx[i, :len(chat)] = tensor(chat.context, dtype=torch.int)
         self.chat_ctx_idx += 1  # zero is padding
-        chat_resp_idx = tensor([c.resp for c in batch.chats], dtype=torch.long)
+        self.chat_resp_idx = tensor([c.resp for c in batch.chats], dtype=torch.long)
 
         # task: prepare response sequence
-        self.resp_seqs = torch.index_select(self.utters, 0, chat_resp_idx)
-        self.resp_chars = torch.index_select(self.chars, 0, chat_resp_idx)
-        self.resp_lens = torch.index_select(self.utter_lens, 0, chat_resp_idx)
+        self.resp_seqs = torch.index_select(self.utters, 0, self.chat_resp_idx)
+        self.resp_chars = torch.index_select(self.chars, 0, self.chat_resp_idx)
+        self.resp_lens = torch.index_select(self.utter_lens, 0, self.chat_resp_idx)
         self.max_resp_len = self.resp_lens.max()
         self.tot_resp_toks = self.resp_lens.sum()
+
+    def to_beamed_batch(self, beam_size):
+
+        # its short for beamed_batch (not baby)
+        bb = copy.deepcopy(self)
+
+        #  batch repeated beam_size times
+        bb.n_chats = self.n_chats * beam_size
+        bb.chat_ctx_idx = self.chat_ctx_idx.repeat(1, beam_size).view(bb.n_chats, -1)
+        bb.chat_lens = self.chat_lens.unsqueeze(1).repeat(1, beam_size).view(bb.n_chats)
+        bb.chat_resp_idx = self.chat_resp_idx.unsqueeze(1).repeat(1, beam_size).view(bb.n_chats)
+        bb.resp_chars = self.resp_chars.repeat(1, beam_size).view(bb.n_chats)
+        if self.resp_seqs is not None:
+            bb.resp_seqs = self.resp_seqs.repeat(1, beam_size).view(bb.n_chats, -1)
+            bb.resp_lens = self.resp_lens.unsqueeze(1).repeat(1, beam_size).view(bb.n_chats)
+        bb.tot_resp_toks = bb.resp_lens.sum()
+        return bb
 
     def print(self):
         print(f"Dialog: {id(self):X}, Utters: {self.n_utters}; Chats: {self.n_chats}")

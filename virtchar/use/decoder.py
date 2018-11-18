@@ -11,7 +11,7 @@ from virtchar import DialogExperiment
 from virtchar import log, device, my_tensor as tensor, debug_mode
 from virtchar.model.rnn import HRED
 from virtchar.tool.dataprep import PAD_TOK, BOS_TOK, EOS_TOK, subsequent_mask, \
-    RawDialogReader, ChatRec, DialogMiniBatch
+    RawDialogReader, ChatRec, DialogMiniBatch, Dialog
 from virtchar.model.t2t import T2TModel
 
 Hypothesis = Tuple[float, List[int]]
@@ -191,7 +191,7 @@ class Decoder:
         selected = x.masked_select(mask)
         return selected.view(-1, x.size(1))
 
-    def beam_decode(self, batch: DialogMiniBatch, max_len, beam_size=default_beam_size,
+    def beam_decode(self, batch: DialogMiniBatch, max_len=80, beam_size=default_beam_size,
                     num_hyp=None,
                     **args) -> List[List[Hypothesis]]:
         """
@@ -203,7 +203,9 @@ class Decoder:
         :return: List of num_hyp Hypothesis for each sequence in the batch.
          Each hypothesis consists of score and a list of word indexes.
         """
-        # TODO: rewrite this, this function is a mess!
+        # TODO: rewrite this, this function is a total mess!
+        #       TG is not happy about it; it was his first attempt to implement beam decoder
+
         # repeat beam size
         batch_size = batch.n_chats
         assert batch_size == 1  # TODO: test large batches
@@ -211,12 +213,12 @@ class Decoder:
             num_hyp = beam_size
         beam_size = max(beam_size, num_hyp)
 
+        beamed_batch = batch.to_beamed_batch(beam_size)
         # Everything beamed_*  below is the batch repeated beam_size times
-        beamed_batch_size = batch_size * beam_size
+        beamed_batch_size = beamed_batch.n_chats
+        assert beamed_batch_size == beam_size * batch_size
 
-        beamed_x_seqs = x_seqs.repeat(1, beam_size).view(beamed_batch_size, -1)
-        beamed_x_lens = x_lens.view(-1, 1).repeat(1, beam_size).view(beamed_batch_size)
-        generator = self.generator(beamed_x_seqs, beamed_x_lens)
+        generator = self.generator(beamed_batch)
 
         beamed_ys = torch.full(size=(beamed_batch_size, 1), fill_value=self.bos_val,
                                dtype=torch.long, device=device)
@@ -327,24 +329,25 @@ class Decoder:
     def char_vocab(self):
         return self.exp.char_field
 
-    def generate_chat(self, batch: DialogMiniBatch, **args) -> List[StrHypothesis]:
+    def generate_chat(self, batch: DialogMiniBatch, beam_size, **args) -> List[StrHypothesis]:
         assert batch.n_chats == 1  # testing one at a time, for now
 
-        greedy_score, greedy_out = self.greedy_decode(batch, **args)[0]
-        greedy_out = self.text_vocab.decode_ids(greedy_out, trunc_eos=True)
-        log.debug(f'Greedy : score: {greedy_score:.4f} :: {greedy_out}')
-        result = [(greedy_score, greedy_out)]
-        """
-        FIXME: beam decode
-        beams: List[List[Hypothesis]] = self.beam_decode(in_seqs, in_lens, max_len, **args)
-        beams = beams[0]  # first sentence, the only one we passed to it as input
-        result = []
-        for i, (score, beam_toks) in enumerate(beams):
-            out = self.out_vocab.decode_ids(beam_toks, trunc_eos=True)
-            if self.debug:
-                log.debug(f"Beam {i}: score:{score:.4f} :: {out}")
-            result.append((score, out))
-        """
+        if beam_size == 1:
+            greedy_score, greedy_out = self.greedy_decode(batch, **args)[0]
+            greedy_out = self.text_vocab.decode_ids(greedy_out, trunc_eos=True)
+            log.debug(f'Greedy : score: {greedy_score:.4f} :: {greedy_out}')
+            result = [(greedy_score, greedy_out)]
+        else:
+            assert beam_size > 1
+            beams: List[List[Hypothesis]] = self.beam_decode(batch, beam_size=beam_size, **args)
+            beams = beams[0]  # first sentence, the only one we passed to it as input
+            result = []
+            for i, (score, beam_toks) in enumerate(beams):
+                out = self.text_vocab.decode_ids(beam_toks, trunc_eos=True)
+                if self.debug:
+                    log.debug(f"Beam {i}: score:{score:.4f} :: {out}")
+                result.append((score, out))
+
         return result
 
     # noinspection PyUnresolvedReferences
@@ -432,27 +435,32 @@ class Decoder:
                 traceback.print_exc()
                 print_state = True
 
-    def decode_file(self, inp, out, **args):
-        reader = RawDialogReader(inp, text_field=self.text_vocab, char_field=self.char_vocab)
-
+    def decode_dialogs(self, dialogs: Iterator[Dialog], out, **args):
         # Todo: get these form  args
         min_ctx, max_ctx = 3, 6
         test_chars = ('Monica', 'Chandler')
+
         assert all(x in self.char_vocab for x in test_chars)
         test_chars = [self.char_vocab[x] for x in test_chars]
-        for i, dialog in enumerate(reader):
+        for i, dialog in enumerate(dialogs):
             chats: Iterator[ChatRec] = dialog.as_test_chats(min_ctx=min_ctx, max_ctx=max_ctx,
                                                             test_chars=test_chars)
             batches: Iterator[Tuple[ChatRec, DialogMiniBatch]] = \
                 [(c, c.as_dialog_mini_batch()) for c in chats]
             # One chat in batch. Should/can be improved later
             for j, (chat, batch) in enumerate(batches):
-                log.info(f"dialog: {i}: chat: {j} : {chat.response}")
+                log.info(f"dialog: {i}: chat: {j} ::"
+                         f" {chat.response.raw_char}: {chat.response.raw_text}")
 
                 result = self.generate_chat(batch, **args)
                 num_hyp = args['num_hyp']
-                out_line = '\n'.join(f'{hyp}\t{score:.4f}' for score, hyp in result)
-                out.write(f'{out_line}\n')
-                log.debug(f"OUT: {i}: {out_line}\n")
-                if num_hyp > 1:
-                    out.write('\n')
+                out_line = '\n'.join(f'{hyp}\t{score:.4f}' for score, hyp in result) + '\n'
+                log.info(f"OUT: {i}: {out_line}")
+                if out:
+                    out.write(out_line)
+                    if num_hyp > 1:
+                        out.write('\n')
+
+    def decode_file(self, inp, out, **args):
+        reader = RawDialogReader(inp, text_field=self.text_vocab, char_field=self.char_vocab)
+        self.decode_dialogs(reader, out, **args)
