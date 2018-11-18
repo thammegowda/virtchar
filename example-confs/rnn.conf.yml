@@ -1,4 +1,4 @@
-
+model_type: HRED
 prep:
   train_dialogs: data/friends/friends.train.tok.tsv
   valid_dialogs: data/friends/friends.dev.tok.tsv
