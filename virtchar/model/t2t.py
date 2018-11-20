@@ -15,13 +15,22 @@ from virtchar import device, log, my_tensor as tensor, DialogExperiment
 from virtchar.model import DialogModel
 from virtchar.model.trainer import TrainerState, SteppedTrainer
 from virtchar.tool.dataprep import DialogMiniBatch
-from virtchar.tool.dataprep import PAD_TOK_IDX as pad_value
-
+from virtchar.tool.dataprep import PAD_TOK_IDX as PAD_IDX, BOS_TOK_IDX as BOS_IDX
 
 
 def clones(module, N):
     "Produce N identical layers."
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
+
+
+class Embeddings(nn.Module):
+    def __init__(self, d_model, vocab):
+        super(Embeddings, self).__init__()
+        self.lut = nn.Embedding(vocab, d_model)
+        self.d_model = d_model
+
+    def forward(self, x):
+        return self.lut(x) * math.sqrt(self.d_model)
 
 
 class Generator(nn.Module):
@@ -44,6 +53,8 @@ class EncoderLayer(nn.Module):
         super(EncoderLayer, self).__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
+        # Residual connection for both the layers:
+        # 1) encoder self attn 2) feed forward layer
         self.sublayer = clones(SublayerConnection(size, dropout), 2)
         self.size = size
 
@@ -77,106 +88,30 @@ class DecoderLayer(nn.Module):
         self.self_attn = self_attn
         self.src_attn = src_attn
         self.feed_forward = feed_forward
+        # Residual connection for all three layers :
+        # 1) decoder self attn 2) dec-enc source attn, 3) feed forward layer
         self.sublayer = clones(SublayerConnection(size, dropout), 3)
 
-    def forward(self, x, memory, src_mask, tgt_mask):
+    def forward(self, x, enc_outs, src_mask, tgt_mask):
         "Follow Figure 1 (right) for connections."
-        m = memory
         x = self.sublayer[0](x, lambda _x: self.self_attn(_x, _x, _x, tgt_mask))
-        x = self.sublayer[1](x, lambda _x: self.src_attn(_x, m, m, src_mask))
+        x = self.sublayer[1](x, lambda _x: self.src_attn(_x, enc_outs, enc_outs, src_mask))
         return self.sublayer[2](x, self.feed_forward)
 
 
 class Decoder(nn.Module):
     "Generic N layer decoder with masking."
 
-    def __init__(self, layer: DecoderLayer, N: int):
+    def __init__(self, layer: DecoderLayer, n_layers: int):
         super(Decoder, self).__init__()
-        self.layers = clones(layer, N)
+        self.layers = clones(layer, n_layers)
         self.norm = LayerNorm(layer.size)
 
-    def forward(self, x, memory, src_mask, tgt_mask):
+    def forward(self, tgt_prev, memory, src_mask, tgt_mask):
+        x = tgt_prev
         for layer in self.layers:
             x = layer(x, memory, src_mask, tgt_mask)
         return self.norm(x)
-
-
-class T2TModel(DialogModel):
-    """
-    A standard Encoder-Decoder architecture. Base for this and many
-    other models.
-    """
-    def __init__(self, encoder: Encoder, decoder: Decoder,
-                 src_embed, tgt_embed,
-                 generator: Generator):
-        super(T2TModel, self).__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-        self.src_embed = src_embed
-        self.tgt_embed = tgt_embed
-        self.generator = generator
-        self.tgt_vocab = generator.vocab
-
-    @property
-    def model_dim(self):
-        return self.generator.d_model
-
-    def forward(self, src, tgt, src_mask, tgt_mask):
-        "Take in and process masked src and target sequences."
-        enc_outs = self.encode(src, src_mask)
-        return self.decode(enc_outs, src_mask, tgt, tgt_mask)
-
-    def encode(self, src, src_mask):
-        return self.encoder(self.src_embed(src), src_mask)
-
-    def decode(self, memory, src_mask, tgt, tgt_mask):
-        return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
-
-    @staticmethod
-    def make_model(src_vocab, tgt_vocab, n_layers=6, hid_size=512, ff_size=2048, n_heads=8,
-                   dropout=0.1, tied_emb='three-way'):
-        "Helper: Construct a model from hyper parameters."
-
-        # args for reconstruction of model
-        args = {'src_vocab': src_vocab,
-                'tgt_vocab': tgt_vocab,
-                'n_layers': n_layers,
-                'hid_size': hid_size,
-                'ff_size': ff_size,
-                'n_heads': n_heads,
-                'dropout': dropout,
-                'tied_emb': tied_emb
-                }
-        c = copy.deepcopy
-        attn = MultiHeadedAttention(n_heads, hid_size)
-        ff = PositionwiseFeedForward(hid_size, ff_size, dropout)
-
-        encoder = Encoder(EncoderLayer(hid_size, c(attn), c(ff), dropout), n_layers)
-        decoder = Decoder(DecoderLayer(hid_size, c(attn), c(attn), c(ff), dropout), n_layers)
-
-        src_emb = nn.Sequential(Embeddings(hid_size, src_vocab), PositionalEncoding(hid_size, dropout))
-        tgt_emb = nn.Sequential(Embeddings(hid_size, tgt_vocab), PositionalEncoding(hid_size, dropout))
-        generator = Generator(hid_size, tgt_vocab)
-
-        model = T2TModel(encoder, decoder, src_emb, tgt_emb, generator)
-        if tied_emb:
-            assert src_vocab == tgt_vocab
-            if tied_emb == 'three-way':
-                log.info("Tying the embedding weights, three ways: (SrcIn == TgtIn == TgtOut")
-                model.src_embed[0].lut.weight = model.tgt_embed[0].lut.weight
-                model.generator.proj.weight = model.tgt_embed[0].lut.weight
-            elif tied_emb == 'two-way':
-                log.info("Tying the embedding weights, two ways: (SrcIn == TgtIn")
-                model.src_embed[0].lut.weight = model.tgt_embed[0].lut.weight
-            else:
-                raise Exception('Invalid argument to tied_emb; Known: {three-way, two-way}')
-
-        # This was important from their code.
-        # Initialize parameters with Glorot / fan_avg.
-        for p in model.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
-        return model, args
 
 
 class LayerNorm(nn.Module):
@@ -243,9 +178,8 @@ class MultiHeadedAttention(nn.Module):
         nbatches = query.size(0)
 
         # 1) Do all the linear projections in batch from d_model => h x d_k
-        query, key, value = \
-            [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
-             for l, x in zip(self.linears, (query, key, value))]
+        query, key, value = [lin(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+                             for lin, x in zip(self.linears, (query, key, value))]
 
         # 2) Apply attention on all the projected vectors in batch.
         x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
@@ -268,16 +202,6 @@ class PositionwiseFeedForward(nn.Module):
         return self.w_2(self.dropout(F.relu(self.w_1(x))))
 
 
-class Embeddings(nn.Module):
-    def __init__(self, d_model, vocab):
-        super(Embeddings, self).__init__()
-        self.lut = nn.Embedding(vocab, d_model)
-        self.d_model = d_model
-
-    def forward(self, x):
-        return self.lut(x) * math.sqrt(self.d_model)
-
-
 class PositionalEncoding(nn.Module):
     "Implement the PE function."
 
@@ -288,7 +212,8 @@ class PositionalEncoding(nn.Module):
         # Compute the positional encodings once in log space.
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * -(math.log(10000.0) / d_model))
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float) * -(math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0)
@@ -299,10 +224,178 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class HieroTransformer(DialogModel):
+    """
+    A standard Encoder-Decoder architecture. Base for this and many
+    other models.
+    """
+
+    def __init__(self, utter_encoder: Encoder,
+                 ctx_encoder: Encoder,
+                 decoder: Decoder,
+                 text_embed,
+                 generator: Generator):
+        super(HieroTransformer, self).__init__()
+        self.utter_encoder = utter_encoder
+        self.ctx_encoder = ctx_encoder
+        self.decoder = decoder
+        self.text_embed = text_embed
+        # self.char_embed = char_embed
+        self.generator = generator
+        self._model_dim = generator.d_model
+
+    @property
+    def model_dim(self):
+        return self._model_dim
+
+    @classmethod
+    def mask_pad_future(cls, seqs, pad=PAD_IDX):
+        """
+        Create a mask to hide padding and future words.
+        :param seqs:
+        :param pad: pad value
+        :return:
+        """
+        mask = (seqs != pad).unsqueeze(1)
+        max_seq_len = seqs.shape[-1]
+        mask = mask & cls.subsequent_mask(max_seq_len).type_as(mask.data)
+        return mask
+
+    @staticmethod
+    def subsequent_mask(size):
+        """
+        Mask out subsequent positions. upper diagonal elements should be zero
+        :param size:
+        :return: mask where positions are filled with zero for subsequent positions
+        """
+        # upper diagonal elements are 1s, lower diagonal and the main diagonal are zeroed
+        triu = torch.triu(torch.ones(size, size, dtype=torch.int8, device=device), diagonal=1)
+        # invert it
+        mask = triu == 0
+        mask = mask.unsqueeze(0)
+        return mask
+
+    def forward(self, batch: DialogMiniBatch, add_bos=True):
+        "Take in and process masked src and target sequences."
+
+        ctx_enc_outs, ctx_mask = self.hiero_encode(batch.utters, batch.utter_lens, batch.chars,
+                                                   batch.chat_ctx_idx)
+        tgt_seqs = batch.resp_seqs
+        if add_bos:
+            # Add BOS token at the first time step
+            bos_col = torch.full(size=(tgt_seqs.shape[0], 1), fill_value=BOS_IDX,
+                                 device=device, dtype=torch.long)
+            tgt_seqs = torch.cat([bos_col, tgt_seqs], dim=1)
+        dec_feats = self.decode(ctx_enc_outs, ctx_mask, tgt_seqs)
+        if add_bos:
+            # remove it
+            dec_feats = dec_feats[:, 1:]
+        # this can be projected to vocabulary space to produce words
+        return dec_feats
+
+    def hiero_encode(self, utter_seqs, utter_lens, chars, chat_ctx_idx):
+
+        n_utters, max_len = utter_seqs.shape
+        utter_mask = (utter_seqs != PAD_IDX)
+        # :: level 1 :: prepare
+        text_embs = self.text_embed(utter_seqs).view(n_utters, max_len, -1)
+
+        # TODO: add character embeddings
+        # char_embs = self.char_embed(chars).view(n_utters, 1, self.char_emb.emb_size)
+        # repeat the character embedding for each time step in sequence
+        # char_embs = char_embs.expand(n_utters, max_len, self.char_emb.emb_size)
+
+        # TODO: character embedding masking by length, when unequal length batch
+        # concat word embedding and character embedding along the last dimension
+        # merged_embs = torch.cat([text_embs, char_embs], dim=-1)
+
+        utter_encoded = self.utter_encoder(text_embs, utter_mask.unsqueeze(1))
+        # level 1 :: post process
+        # Mask out padded time steps
+        utter_encoded = utter_encoded * utter_mask.unsqueeze(2).type_as(utter_encoded)
+
+        # Sum element wise along the time dimension
+        sent_reprs = utter_encoded.sum(dim=1)
+        # Divide by the sqrt of length of sentences. Why? normalize the effect of unequal length
+        # Google guys did it too: https://arxiv.org/pdf/1803.11175.pdf (I learned this from them)
+        sent_reprs = sent_reprs.div(utter_lens.float().sqrt().unsqueeze(1))
+
+        # :: level 2 :: Prepare
+        # Now, we need to construct chat context from these
+        # Inserting 0s at the 0th row, so we can pick rows based on indices, where index=0 is pad
+        padded_sent_repr = torch.cat(
+            [torch.zeros(1, sent_reprs.shape[1], device=device), sent_reprs], dim=0)
+
+        # index_select works with vector, so we flatten and then restore
+        chat_input = torch.index_select(padded_sent_repr, 0, chat_ctx_idx.view(-1))
+        chat_input = chat_input.view(*chat_ctx_idx.shape, -1)
+
+        chat_mask = (chat_ctx_idx != 0).unsqueeze(1)
+        chat_enc_outs = self.ctx_encoder(chat_input, chat_mask)
+        return chat_enc_outs, chat_mask
+
+    def decode(self, memory, src_mask, tgt_seqs):
+        tgt_mask = self.mask_pad_future(tgt_seqs)
+        tgt_prev_embs = self.text_embed(tgt_seqs)
+        return self.decoder(tgt_prev_embs, memory, src_mask, tgt_mask)
+
+    @staticmethod
+    def make_model(text_vocab,
+                   n_layers=6,
+                   hid_size=512,
+                   ff_size=2048,
+                   n_heads=8,
+                   dropout=0.1,
+                   tied_emb='three-way'):
+        "Helper: Construct a model from hyper parameters."
+
+        # args for reconstruction of model
+        args = {'text_vocab': text_vocab,
+                # 'char_vocab': char_vocab,
+                'n_layers': n_layers,
+                'hid_size': hid_size,
+                'ff_size': ff_size,
+                'n_heads': n_heads,
+                'dropout': dropout,
+                'tied_emb': tied_emb
+                }
+        c = copy.deepcopy
+        attn = MultiHeadedAttention(n_heads, hid_size)
+
+        ff = PositionwiseFeedForward(hid_size, ff_size, dropout)
+        utter_encoder = Encoder(EncoderLayer(hid_size, c(attn), c(ff), dropout), n_layers)
+        ctx_encoder = Encoder(EncoderLayer(hid_size, c(attn), c(ff), dropout), n_layers)
+        decoder = Decoder(DecoderLayer(hid_size, c(attn), c(attn), c(ff), dropout), n_layers)
+
+        # char_emb = Embeddings(char_emb_size, char_vocab)
+        text_emb = nn.Sequential(Embeddings(hid_size, text_vocab),
+                                 PositionalEncoding(hid_size, dropout))
+        # resp_text_emb = nn.Sequential(Embeddings(text_emb_size, text_vocab),
+        #                              PositionalEncoding(hid_size, dropout))
+        generator = Generator(hid_size, text_vocab)
+
+        model = HieroTransformer(utter_encoder=utter_encoder,
+                                 ctx_encoder=ctx_encoder,
+                                 decoder=decoder,
+                                 text_embed=text_emb,
+                                 generator=generator)
+
+        # Tied embeddings
+        if tied_emb:
+            model.generator.proj.weight = model.text_embed[0].lut.weight
+
+        # Initialize parameters with Glorot / fan_avg.
+        for p in model.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        return model, args
+
+
 class LabelSmoothing(nn.Module):
     """
     Label smoothing
     """
+
     def __init__(self, vocab_size: int, padding_idx: int, smoothing=0.1):
         super(LabelSmoothing, self).__init__()
         self._size = vocab_size
@@ -351,10 +444,9 @@ class SimpleLossFunction:
         self.opt = opt
 
     def __call__(self, x_feats, y_seqs, norm, train_mode=True):
-
         x_probs = self.generator(x_feats)  # B x T x D --> B x T x V
 
-        scores = x_probs.contiguous().view(-1, x_probs.size(-1))    # B x T x V --> B.T x V
+        scores = x_probs.contiguous().view(-1, x_probs.size(-1))  # B x T x V --> B.T x V
         truth = y_seqs.contiguous().view(-1)  # B x T --> B.T
         assert norm != 0
         loss = self.criterion(scores, truth).sum() / norm
@@ -365,72 +457,27 @@ class SimpleLossFunction:
         return loss.item() * norm
 
 
-class MultiGPULossFunction(SimpleLossFunction):
-    """
-    Loss function that uses Multiple GPUs
-    Currently uses DataParallel, but this is only the early version
-    """
-    def __init__(self, generator, criterion, devices, opt, out_device=None):
-        super(MultiGPULossFunction, self).__init__(generator, criterion, opt)
-        self.multi_gpu = False
-        if len(devices) > 1:
-            self.multi_gpu = True
-            self.device_ids = devices
-            self.out_device = out_device if out_device is not None else devices[0]
-            # Send out to different gpus.
-            self.criterion = nn.parallel.replicate(criterion, devices=devices)
-            self.generator = nn.parallel.replicate(generator, devices=self.device_ids)
-
-    def __call__(self, outs, targets, norm, train_mode=True):
-        if not self.multi_gpu:
-            # let the parent class deal with this
-            return super(MultiGPULossFunction, self).__call__(outs, targets, norm, train_mode)
-
-        # FIXME: there seems to be a bug in this below code
-        # TODO: generate outputs in chunks
-        batch_dim = 0
-        assert outs.shape[batch_dim] == targets.shape[batch_dim]
-        sct_outs = nn.parallel.scatter(outs, target_gpus=self.device_ids, dim=batch_dim)
-        sct_tgts = nn.parallel.scatter(targets, target_gpus=self.device_ids, dim=batch_dim)
-        assert len(sct_outs) == len(sct_tgts)
-        sct_generators = self.generator[:len(sct_outs)]
-        sct_criteria = self.criterion[:len(sct_outs)]
-        sct_preds = nn.parallel.parallel_apply(sct_generators, sct_outs)
-        pairs = [(pred.contiguous().view(-1, pred.size(-1)),
-                  tgt.contiguous().view(-1)) for pred, tgt in zip(sct_preds, sct_tgts)]
-        sct_losses = nn.parallel.parallel_apply(sct_criteria, pairs)
-        sent_losses = nn.parallel.gather(sct_losses, target_device=self.out_device, dim=batch_dim)
-        total_loss = (sent_losses.sum() / norm)
-        total_loss_val = total_loss.item()
-        if train_mode:
-            total_loss.backward()
-            self.opt.step()
-            self.opt.zero_grad()
-        return total_loss_val * norm
-
-
 class T2TTrainer(SteppedTrainer):
 
     def __init__(self, exp: DialogExperiment,
-                 model: Optional[T2TModel] = None,
+                 model: Optional[HieroTransformer] = None,
                  optim: str = 'ADAM',
                  **optim_args):
-        super().__init__(exp, model, model_factory=T2TModel.make_model, optim=optim, **optim_args)
+        super().__init__(exp, model, model_factory=HieroTransformer.make_model, optim=optim,
+                         **optim_args)
 
         device_ids = list(range(torch.cuda.device_count()))
-        log.info(f"Going to use {torch.cuda.device_count()} GPUs ; ids:{device_ids}")
+        log.info(f"Going to use {torch.cuda.device_count()} GPU(s) ; ids:{device_ids}")
 
-        if len(device_ids) > 1:   # Multi GPU mode
-            log.warning("Multi GPU mode <<this feature is not well tested>>")
-            self.model = nn.DataParallel(self.model, dim=0, device_ids=device_ids)
+        if len(device_ids) > 1:  # Multi GPU mode
+            raise Exception("Multi GPU mode not supported yet")
         generator = self.model.generator
 
         criterion = LabelSmoothing(vocab_size=generator.vocab,
-                                   padding_idx=pad_value,
+                                   padding_idx=PAD_IDX,
                                    smoothing=self._smoothing)
 
-        self.loss_func = MultiGPULossFunction(generator, criterion, devices=device_ids,
-                                              opt=self.opt)
+        self.loss_func = SimpleLossFunction(generator, criterion, opt=self.opt)
 
     def run_valid_epoch(self, data_iter: Iterator[DialogMiniBatch]):
         """
@@ -440,13 +487,12 @@ class T2TTrainer(SteppedTrainer):
         start = time.time()
         total_tokens = 0
         total_loss = 0.0
-        with tqdm(data_iter, total=data_iter.num_batches, unit='batch') as data_bar:
+        with tqdm(data_iter, unit='batch') as data_bar:
             for i, batch in enumerate(data_bar):
-                batch = batch.to(device)
-                num_toks = batch.y_toks
-                out = self.model(batch.x_seqs, batch.y_seqs, batch.x_mask, batch.y_mask)
-                # skip the BOS token in  batch.y_seqs
-                loss = self.loss_func(out, batch.y_seqs_nobos, num_toks, False)
+                num_toks = batch.tot_resp_toks.float().item()
+                out = self.model(batch)
+                # skip the BOS token in batch.y_seqs
+                loss = self.loss_func(out, batch.resp_seqs, num_toks, False)
                 total_loss += loss
                 total_tokens += num_toks
                 elapsed = time.time() - start
@@ -459,48 +505,32 @@ class T2TTrainer(SteppedTrainer):
         score = total_loss / total_tokens
         return score
 
-    def overfit_batch(self, batch, max_iters=100, stop_loss=0.01):
-        """
-        Try to over fit given batch (for testing purpose only, as suggested in
-         https://twitter.com/karpathy/status/1013244313327681536)
-        """
-        tokens = 0
-        loss = float('inf')
-        for i in tqdm(range(max_iters)):
-            num_toks = batch.y_toks
-            out = self.model(batch.x_seqs, batch.y_seqs, batch.x_mask, batch.y_mask)
-            # skip the BOS token in  batch.y_seqs
-            loss = self.loss_func(out, batch.y_seqs_nobos, num_toks)
-            tokens += num_toks
-            if abs(loss) < abs(stop_loss):
-                log.info(f"Stopping early at iter {i}.. Loss = {loss:.4f}")
-                return i, loss
-        return max_iters - 1, loss
-
-    def train(self, steps: int, check_point: int, batch_size: int,
-              check_pt_callback: Optional[Callable]=None, fine_tune=False, **args):
-        log.info(f'Going to train for {steps} epochs; batch_size={batch_size}; '
+    def train(self, steps: int, check_point: int,
+              check_pt_callback: Optional[Callable] = None,
+              fine_tune=False, **args):
+        log.info(f'Going to train for {steps} epochs; '
                  f'check point size:{check_point}; fine_tune={fine_tune}')
         keep_models = args.get('keep_models', 4)  # keep last _ models and delete the old
 
         if steps <= self.start_step:
             raise Exception(f'The model was already trained to {self.start_step} steps. '
                             f'Please increase the steps or clear the existing models')
-        train_data = self.exp.get_train_data(batch_size=batch_size,
-                                             steps=steps - self.start_step,
-                                             shuffle=True, batch_first=True, fine_tune=fine_tune)
-        val_data = self.exp.get_val_data(batch_size, shuffle=False, batch_first=True)
+        train_data = self.exp.get_train_data(loop_steps=steps - self.start_step,
+                                             fine_tune=fine_tune)
+        val_data = self.exp.get_val_data()
 
         train_state = TrainerState(self.model, check_point=check_point)
         train_state.train_mode(True)
+
         with tqdm(train_data, initial=self.start_step, total=steps, unit='batch') as data_bar:
             for batch in data_bar:
-                batch = batch.to(device)
-                num_toks = batch.y_toks
+                batch: DialogMiniBatch = batch  # type annotation
                 self.model.zero_grad()
-                out = self.model(batch.x_seqs, batch.y_seqs, batch.x_mask, batch.y_mask)
+                out = self.model(batch)
+
+                num_toks = batch.tot_resp_toks.float().item()
                 # skip the BOS token in  batch.y_seqs
-                loss = self.loss_func(out, batch.y_seqs_nobos, num_toks, True)
+                loss = self.loss_func(out, batch.resp_seqs, num_toks, True)
                 self.tbd.add_scalars('training', {'step_loss': loss,
                                                   'learn_rate': self.opt.curr_lr},
                                      self.opt.curr_step)
@@ -509,7 +539,7 @@ class T2TTrainer(SteppedTrainer):
                 progress_msg += f', LR={self.opt.curr_lr:g}'
 
                 data_bar.set_postfix_str(progress_msg, refresh=False)
-                del batch   # TODO: force free memory
+                del batch  # TODO: force free memory
 
                 if is_check_pt:
                     train_loss = train_state.reset()
@@ -523,38 +553,24 @@ class T2TTrainer(SteppedTrainer):
 
 
 def __test_model__():
+    work_dir = '/Users/tg/work/phd/cs644/project/virtchar/tmp.work.transformer'
+    exp = DialogExperiment(work_dir, read_only=True)
+    text_vocab = len(exp.text_field)
+    char_vocab = len(exp.char_field)
 
-    from virtchar.tool.dummy import DummyExperiment
-    vocab_size = 14
-    model, _ = T2TModel.make_model(vocab_size, vocab_size,
-                                   n_layers=4, hid_size=128, ff_size=256, n_heads=4)
-    if False:
-        for n, p in model.named_parameters():
-            print(n, p.shape)
+    steps = 2000
+    check_pt = 10
 
-    from virtchar.use.decoder import Decoder
-
-    exp = DummyExperiment("work", config={'model_type': 't2t'}, read_only=True,
-                          vocab_size=vocab_size)
+    model, _ = HieroTransformer.make_model(text_vocab,
+                                           # char_vocab,
+                                           n_layers=4,
+                                           hid_size=128,
+                                           ff_size=256,
+                                           n_heads=4)
 
     trainer = T2TTrainer(exp=exp, model=model, warmup_steps=200)
-    decr = Decoder.new(exp, trainer.model)
 
-    assert 2 == Batch.bos_val
-    src = tensor([[2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
-                  [2, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4]])
-    src_lens = tensor([src.size(1)] * src.size(0))
-
-    def check_pt_callback(**args):
-        res = decr.greedy_decode(src, src_lens, max_len=12)
-        for score, seq in res:
-            log.info(f'{score:.4f} :: {seq}')
-
-    batch_size = 50
-    steps = 500
-    check_point = 10
-    trainer.train(steps=steps, check_point=check_point, batch_size=batch_size,
-                  check_pt_callback=check_pt_callback)
+    trainer.train(steps=steps, check_point=check_pt)
 
 
 if __name__ == '__main__':

@@ -10,9 +10,9 @@ from torch import nn as nn
 from virtchar import DialogExperiment
 from virtchar import log, device, my_tensor as tensor, debug_mode
 from virtchar.model.rnn import HRED
-from virtchar.tool.dataprep import PAD_TOK, BOS_TOK, EOS_TOK, subsequent_mask, \
+from virtchar.tool.dataprep import PAD_TOK, BOS_TOK, EOS_TOK, \
     RawDialogReader, ChatRec, DialogMiniBatch, Dialog
-from virtchar.model.t2t import T2TModel
+from virtchar.model.t2t import HieroTransformer
 
 Hypothesis = Tuple[float, List[int]]
 StrHypothesis = Tuple[float, str]
@@ -51,22 +51,23 @@ class Seq2SeqGenerator(GeneratorFactory):
 
 class T2TGenerator(GeneratorFactory):
 
-    def __init__(self, model: T2TModel, x_seqs, x_lens=None):
+    def __init__(self, model: HieroTransformer, batch: DialogMiniBatch):
         super().__init__(model)
-        self.x_mask = (x_seqs != Decoder.pad_val).unsqueeze(1)
-        self.memory = self.model.encode(x_seqs, self.x_mask)
+        self.memory, self.inp_mask = self.model.hiero_encode(batch.utters, batch.utter_lens,
+                                                             batch.chars, batch.chat_ctx_idx)
 
     def generate_next(self, past_ys):
-        out = self.model.decode(self.memory, self.x_mask, past_ys, subsequent_mask(past_ys.size(1)))
+        # TODO: this is in efficient since the past_ys are encoded freshly for every time step
+        out = self.model.decode(self.memory, self.inp_mask, past_ys)
         log_probs = self.model.generator(out[:, -1])
         return log_probs
 
 
-generators = {'t2t': T2TGenerator,
+generators = {'TRANSFORMER': T2TGenerator,
               'HRED': Seq2SeqGenerator
               }
 factories = {
-    't2t': T2TModel.make_model,
+    'TRANSFORMER': HieroTransformer.make_model,
     'HRED': HRED.make_model,
 }
 

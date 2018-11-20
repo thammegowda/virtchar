@@ -704,21 +704,3 @@ def read_lines(path: Union[str, Path]):
 
 def tokenize(strs: List[str]) -> List[List[str]]:
     return [s.split() for s in strs]
-
-
-def subsequent_mask(size):
-    """
-    Mask out subsequent positions. upper diagonal elements should be zero
-    :param size:
-    :return: mask where positions are filled with zero for subsequent positions
-    """
-    # upper diagonal elements are 1s, lower diagonal and the main diagonal are zeroed
-    triu = torch.triu(torch.ones(size, size, dtype=torch.int8, device=device), diagonal=1)
-    # invert it
-    mask = triu == 0
-    mask = mask.unsqueeze(0)
-    return mask
-
-
-if __name__ == '__main__':
-    _test_batching_()

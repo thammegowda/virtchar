@@ -93,7 +93,7 @@ class TrainerState:
 
     def step(self, toks, loss):
         self.steps += 1
-        self.total_toks += toks.item()
+        self.total_toks += toks
         self.total_loss += loss
         return self.progress_bar_msg(), self.is_check_point()
 

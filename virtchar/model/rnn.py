@@ -481,7 +481,7 @@ class SteppedHREDTrainer(SteppedTrainer):
                 # Step Run forward pass.
                 outp_log_probs = self.model(batch)
                 loss = self.loss_func(outp_log_probs, batch, train_mode=False)
-                bar_msg, _ = state.step(batch.tot_resp_toks, loss)
+                bar_msg, _ = state.step(batch.tot_resp_toks.item(), loss)
                 data_bar.set_postfix_str(bar_msg, refresh=False)
         return state.running_loss()
 
@@ -510,7 +510,7 @@ class SteppedHREDTrainer(SteppedTrainer):
                 self.tbd.add_scalars('training', {'step_loss': loss,
                                                   'learn_rate': self.opt.curr_lr},
                                      self.opt.curr_step)
-                bar_msg, is_check_pt = train_state.step(batch.tot_resp_toks, loss)
+                bar_msg, is_check_pt = train_state.step(batch.tot_resp_toks.item(), loss)
                 bar_msg += f', LR={self.opt.curr_lr:g}'
                 data_bar.set_postfix_str(bar_msg, refresh=False)
 
@@ -539,7 +539,7 @@ def __test_seq2seq_model__():
     model_dim = 100
 
     steps = 2000
-    check_pt = 100
+    check_pt = 10
 
     log.info(f"====== VOCAB={text_vocab}, Characters:{char_vocab}======")
     model, args = HRED.make_model(text_vocab=text_vocab, char_vocab=char_vocab,
