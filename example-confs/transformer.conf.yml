@@ -1,14 +1,12 @@
 model_args:
-  attention: dot
-  char_emb_size: 50
-  char_vocab: 11
   dropout: 0.2
-  hid_size: 300
+  ff_size: 2048
+  hid_size: 512
+  n_heads: 8
   n_layers: 2
-  rnn_type: GRU
-  text_emb_size: 300
   text_vocab: 8000
-model_type: HRED
+  tied_emb: three-way
+model_type: TRANSFORMER
 optim:
   args:
     betas:
@@ -16,8 +14,8 @@ optim:
     - 0.98
     eps: 1.0e-09
     label_smoothing: 0.1
-    lr: 0.01
-    warmup_steps: 500
+    lr: 0.1
+    warmup_steps: 200
   name: ADAM
 trainer:
   characters:
@@ -32,4 +30,4 @@ trainer:
   max_ctx: 10
   max_utters: 20
   min_ctx: 2
-updated_at: '2018-11-19T22:40:36.078845'
+updated_at: '2018-11-19T22:42:56.191736'
