@@ -20,13 +20,15 @@ def is_not_punct(tok):
 
 
 def clean(inp, lowercase, remove_puncts):
+    count = 0
     for line in inp:
+        count += 1
         line = line.strip()
         if not line:
             yield ''
         else:
             parts = line.split('\t')
-            assert len(parts), f'ERROR with line: {line}'
+            assert len(parts) == 3, f'ERROR with line at {count}:: {line}'
             rec_id, char_name, text = parts
             if lowercase:
                 text = text.lower()
