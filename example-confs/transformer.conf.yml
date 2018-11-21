@@ -30,4 +30,33 @@ trainer:
   max_ctx: 10
   max_utters: 20
   min_ctx: 2
+prep:
+  characters:
+  - <pad>
+  - <unk>
+  - <scene>
+  - <event>
+  - Ross
+  - Rachel
+  - Monica
+  - Chandler
+  - Phoebe
+  - Joey
+  - Gunter
+  - All
+  finetune_dialogs: data/friends/friends.train.tok.tsv
+  max_seq_len: 50
+  max_types: 8000
+  no_split_toks:
+  - Ross
+  - Rachel
+  - Monica
+  - Chandler
+  - Phoebe
+  - Joey
+  - Gunter
+  pieces: bpe
+  train_dialogs: data/friends/friends.train.tok.tsv
+  valid_dialogs: data/friends/friends.dev.tok.tsv
+  vocab_text: data/friends/friends.train.tok.txt
 updated_at: '2018-11-19T22:42:56.191736'

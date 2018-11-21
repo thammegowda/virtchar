@@ -480,7 +480,7 @@ class SimpleLossFunction:
         return loss.item() * norm
 
 
-class T2TTrainer(SteppedTrainer):
+class HieroTransformerTrainer(SteppedTrainer):
 
     def __init__(self, exp: DialogExperiment,
                  model: Optional[HieroTransformer] = None,
@@ -591,7 +591,7 @@ def __test_model__():
                                            ff_size=256,
                                            n_heads=4)
 
-    trainer = T2TTrainer(exp=exp, model=model, warmup_steps=200)
+    trainer = HieroTransformerTrainer(exp=exp, model=model, warmup_steps=200)
 
     trainer.train(steps=steps, check_point=check_pt)
 

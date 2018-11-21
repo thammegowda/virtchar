@@ -4,7 +4,7 @@ import argparse
 from argparse import ArgumentDefaultsHelpFormatter as ArgFormatter
 
 from virtchar import DialogExperiment as Experiment, log
-from virtchar.model.t2t import T2TTrainer
+from virtchar.model.t2t import HieroTransformerTrainer
 from virtchar.model.rnn import SteppedHREDTrainer
 from virtchar.utils import log_tensor_sizes, Optims
 
@@ -57,7 +57,7 @@ def main():
         optim_args.update({k.strip(): float(v) for k, v in pairs})
 
     trainer = {
-        't2t': T2TTrainer,
+        'TRANSFORMER': HieroTransformerTrainer,
         'HRED': SteppedHREDTrainer,
     }[exp.model_type](exp, optim=args.pop('optim'), **optim_args)
     try:
