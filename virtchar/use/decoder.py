@@ -55,10 +55,11 @@ class T2TGenerator(GeneratorFactory):
         super().__init__(model)
         self.memory, self.inp_mask = self.model.hiero_encode(batch.utters, batch.utter_lens,
                                                              batch.chars, batch.chat_ctx_idx)
+        self.resp_chars = batch.resp_chars
 
     def generate_next(self, past_ys):
         # TODO: this is in efficient since the past_ys are encoded freshly for every time step
-        out = self.model.decode(self.memory, self.inp_mask, past_ys)
+        out = self.model.decode(self.memory, self.inp_mask, past_ys, self.resp_chars)
         log_probs = self.model.generator(out[:, -1])
         return log_probs
 
