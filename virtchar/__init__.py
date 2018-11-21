@@ -8,6 +8,9 @@ import os
 import logging as log
 import yaml
 
+
+__version__ = '0.1.0'
+
 debug_mode = os.environ.get('NMT_DEBUG', False)
 log.basicConfig(level=log.DEBUG if debug_mode else log.INFO)
 log.debug(f"NMT_DEBUG={debug_mode}")
