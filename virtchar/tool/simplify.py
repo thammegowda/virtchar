@@ -28,7 +28,9 @@ def clean(inp, lowercase, remove_puncts):
             yield ''
         else:
             parts = line.split('\t')
-            assert len(parts) == 3, f'ERROR with line at {count}:: {line}'
+            if len(parts) != 3:
+                log.warning(f'Skipping the bad record at line {count}:: {line}')
+                continue
             rec_id, char_name, text = parts
             if lowercase:
                 text = text.lower()
