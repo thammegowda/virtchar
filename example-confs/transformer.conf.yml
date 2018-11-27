@@ -18,32 +18,11 @@ optim:
     warmup_steps: 4000
   name: ADAM
 trainer:
-  characters:
-  - Ross
-  - Rachel
-  - Monica
-  - Chandler
-  - Phoebe
-  - Joey
-  - Gunter
   max_chats: 10
   max_ctx: 10
   max_utters: 20
   min_ctx: 2
 prep:
-  characters:
-  - <pad>
-  - <unk>
-  - <scene>
-  - <event>
-  - Ross
-  - Rachel
-  - Monica
-  - Chandler
-  - Phoebe
-  - Joey
-  - Gunter
-  - All
   finetune_dialogs: data/friends/friends.train.tok.tsv
   max_seq_len: 50
   max_types: 8000

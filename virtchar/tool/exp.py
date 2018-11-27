@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, Dict, Iterator, List, Tuple, Union, Any, Set
 import torch
 import random
+from collections import Counter
 
 from virtchar import log, load_conf
 from virtchar.tool.dataprep import (
@@ -49,6 +50,9 @@ class DialogExperiment:
             if self._text_field_file.exists() else None
         self.char_field = LookupField(str(self._char_field_file)) \
             if self._char_field_file.exists() else None
+
+        # these are the characters to which we optimize the loss
+        self._model_chars = None
 
     def store_config(self):
         with IO.writer(self._config_file) as fp:
@@ -95,6 +99,23 @@ class DialogExperiment:
                 out.write("\n")
             log.info(f"Wrote {count} lines to {path}")
 
+    @staticmethod
+    def scan_characters(path: Path, min_freq: int, unk='<unk>', pad='<pad>') -> List[str]:
+        def _read_char_names():
+            with IO.reader(path) as inp:
+                for line in inp:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 2:
+                        yield parts[-2]
+        stats = Counter(_read_char_names())
+
+        stats = [(char_name, count) for char_name, count in stats.items() if count >= min_freq]
+        stats = sorted(stats, key=lambda pair: pair[1], reverse=True)
+        char_names = [cn for cn, ct in stats]
+        placeholder = [tok for tok in [pad, unk] if tok]
+        char_names = placeholder + char_names
+        return char_names
+
     def pre_process_train_dev(self, args: Dict[str, Any]):
 
         # character names vocabulary
@@ -102,8 +123,11 @@ class DialogExperiment:
             log.warning("Skipping character vocab creating. since it already exists")
             self.char_field = LookupField(self._char_field_file)
         else:
-            assert 'characters' in args and type(args['characters']) is list
-            self.write_lines(self._char_field_file, args['characters'])
+            char_min_freq = args.get('char_min_freq', 500)
+            log.info(f"Scanning characters in training data with with freq {char_min_freq}")
+            char_names = self.scan_characters(args['train_dialogs'], min_freq=char_min_freq)
+            log.info(f"Found {len(char_names)} characters")
+            self.write_lines(self._char_field_file, char_names)
             self.char_field = LookupField(self._char_field_file)
 
         # Dialog Text vocabulary
@@ -332,7 +356,7 @@ class DialogExperiment:
                                        max_ctx=self.max_ctx,
                                        max_dialogs=self.max_utters,
                                        max_utters=self.max_utters,
-                                       model_chars=self.model_characters)
+                                       model_chars=None)
         return LoopingIterable(train_data, total=loop_steps) if loop_steps > 0 else train_data
 
     def get_val_data(self) -> Iterator[DialogMiniBatch]:
@@ -342,12 +366,11 @@ class DialogExperiment:
                                  max_ctx=self.max_ctx,
                                  max_dialogs=self.max_utters,
                                  max_utters=self.max_utters,
-                                 model_chars=self.model_characters)
+                                 model_chars=None)
 
     @property
     def model_characters(self) -> Set[int]:
-        char_names = self.config['trainer']['characters']
-        return set([self.char_field.encode_as_id(c) for c in char_names])
+        raise Exception("Unsupported Op")
 
     @property
     def min_ctx(self):
