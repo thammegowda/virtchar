@@ -318,7 +318,7 @@ class DialogReader:
     This one works with processed data i.e. word ids
     """
 
-    def __init__(self, path: Path, shuffle_buffer_size=500):
+    def __init__(self, path: Path, shuffle_buffer_size=5000):
         """
         :param path: path to read TSV
         """
