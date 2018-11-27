@@ -202,7 +202,7 @@ class SteppedTrainer:
             from virtchar.use.decoder import Decoder
             self.decoder = Decoder.new(self.exp, self.model)
 
-    def show_samples(self, beam_size=3, num_hyp=3, max_len=30):
+    def show_samples(self, beam_size=5, num_hyp=5, max_len=30):
         """
         Logs the output of model (at this stage in training) to a set of samples
         :param beam_size: beam size
