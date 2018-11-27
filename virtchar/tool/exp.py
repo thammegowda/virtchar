@@ -95,19 +95,12 @@ class DialogExperiment:
                 out.write("\n")
             log.info(f"Wrote {count} lines to {path}")
 
-    def read_raw_data(self, dialog_path: Union[str, Path], max_seq_len: int,
-                      text_tokenizer, char_id_mapper) \
-            -> Iterator[DialogRecord]:
-        recs = self.read_raw_lines(dialog_path)
-        recs = ((char_id_mapper(char), text_tokenizer(dialog)) for char, dialog in recs)
-        recs = ((char, dialog[:max_seq_len]) for char, dialog in recs)
-        return recs
-
     def pre_process_train_dev(self, args: Dict[str, Any]):
 
         # character names vocabulary
         if self.char_field and self._char_field_file.exists():
             log.warning("Skipping character vocab creating. since it already exists")
+            self.char_field = LookupField(self._char_field_file)
         else:
             assert 'characters' in args and type(args['characters']) is list
             self.write_lines(self._char_field_file, args['characters'])
@@ -116,6 +109,7 @@ class DialogExperiment:
         # Dialog Text vocabulary
         if self._text_field_file.exists() and self.text_field is not None:
             log.warning("Skipping the vocab creation since it already exist")
+            self.text_field = Field(self._text_field_file)
         else:
             files = [args['vocab_text']]
             no_split_toks = args.get('no_split_toks')
@@ -124,27 +118,13 @@ class DialogExperiment:
                                           no_split_toks=no_split_toks)
 
         # create Piece IDs
-        train_recs = self.read_raw_data(args['train_dialogs'], args['max_seq_len'],
-                                        text_tokenizer=self.text_field.encode_as_ids,
-                                        char_id_mapper=self.char_field.encode_as_id)
-        self.write_tsv(train_recs, self.train_file)
-
-        val_recs = self.read_raw_data(args['valid_dialogs'], args['max_seq_len'],
-                                      text_tokenizer=self.text_field.encode_as_ids,
-                                      char_id_mapper=self.char_field.encode_as_id)
-        self.write_tsv(val_recs, self.valid_file)
-
-        if args.get('text_files'):
-            # Redo again as plain text files
-            train_recs = self.read_raw_data(args['train_dialogs'], args['max_seq_len'],
-                                            text_tokenizer=self.text_field.tokenize,
-                                            char_id_mapper=self.char_field.remap)
-            self.write_tsv(train_recs, str(self.train_file).replace('.tsv', '.pieces.tsv'))
-
-            val_recs = self.read_raw_data(args['valid_dialogs'], args['max_seq_len'],
-                                          text_tokenizer=self.text_field.encode_as_ids,
-                                          char_id_mapper=self.char_field.encode_as_id)
-            self.write_tsv(val_recs, str(self.valid_file).replace('.tsv', '.pieces.tsv'))
+        for key, out_path in [('train_dialogs', self.train_file),
+                              ('valid_dialogs', self.valid_file)]:
+            dialogs = RawDialogReader(args[key],
+                                      text_field=self.text_field,
+                                      char_field=self.char_field,
+                                      max_seq_len=args['max_seq_len'])
+            self.write_dialogs(dialogs, out_path)
 
         if args.get("finetune_src") or args.get("finetune_tgt"):
             self.pre_process_finetune(args)
@@ -162,15 +142,17 @@ class DialogExperiment:
         return dialogs[:n_samples]
 
     @staticmethod
-    def write_dialogs(dialogs: Iterator[Dialog], out: Path):
+    def write_dialogs(dialogs: Iterator[Dialog], out: Path, dialog_sep='\n'):
         count = 0
         with IO.writer(out) as outh:
             for dialog in dialogs:
                 count += 1
-                for u in dialog.chat:
-                    if u.uid:
-                        outh.write(f'{u.uid}\t')
-                    outh.write(f'{u.char}\t{" ".join(u.text)}\n')
+                for utter in dialog.chat:
+                    if utter.uid:
+                        outh.write(f'{utter.uid}\t')
+                    text = " ".join(map(str, utter.text))
+                    outh.write(f'{utter.char}\t{text}\n')
+                outh.write(dialog_sep)
         log.info(f"Wrote {count} recs to {out}")
 
     def pre_process_finetune(self, args=None):
@@ -182,20 +164,11 @@ class DialogExperiment:
         log.info("Going to prep fine tune files")
         args = args if args else self.config['prep']
         assert 'finetune_dialogs' in args
-        # create Piece IDs
-        finetune_recs = self.read_raw_data(args['finetune_dialogs'],
-                                           args['max_seq_len'],
-                                           text_tokenizer=self.text_field.encode_as_ids,
-                                           char_id_mapper=self.char_field.encode_as_id)
-        self.write_tsv(finetune_recs, self.finetune_file)
-
-        if args.get('text_files'):
-            # Redo again as plain text files
-            finetune_recs = self.read_raw_data(args['finetune_dialogs'],
-                                               args['max_seq_len'],
-                                               text_tokenizer=self.text_field.tokenize,
-                                               char_id_mapper=self.char_field.remap)
-            self.write_tsv(finetune_recs, str(self.finetune_file).replace('.tsv', '.pieces.tsv'))
+        dialogs = RawDialogReader(args['finetune_dialogs'],
+                                  text_field=self.text_field,
+                                  char_field=self.char_field,
+                                  max_seq_len=args['max_seq_len'])
+        self.write_dialogs(dialogs, self.finetune_file)
 
     def pre_process(self, args=None):
         args = args if args else self.config['prep']
@@ -352,7 +325,7 @@ class DialogExperiment:
             log.info("Using Fine tuning corpus instead of training corpus")
             inp_file = self.finetune_file
 
-        reader = DialogReader(inp_file, char_field=self.char_field)
+        reader = DialogReader(inp_file)
 
         train_data = DialogBatchReader(reader,
                                        min_ctx=self.min_ctx,
@@ -363,7 +336,7 @@ class DialogExperiment:
         return LoopingIterable(train_data, total=loop_steps) if loop_steps > 0 else train_data
 
     def get_val_data(self) -> Iterator[DialogMiniBatch]:
-        reader = DialogReader(self.valid_file, char_field=self.char_field)
+        reader = DialogReader(self.valid_file)
         return DialogBatchReader(reader,
                                  min_ctx=self.min_ctx,
                                  max_ctx=self.max_ctx,

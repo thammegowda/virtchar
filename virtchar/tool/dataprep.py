@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import copy
 from dataclasses import dataclass, field
+import random
 
 PAD_TOK = '<pad>', 0
 UNK_TOK = '<unk>', 1
@@ -37,8 +38,10 @@ DialogRecord = Tuple[CharacterField, TextField]
 class Field(SentencePieceProcessor):
     """A wrapper class for sentence piece trainer and processor"""
 
-    def __init__(self, path):
-        super(Field, self).__init__()
+    def __init__(self, path: Union[str, Path]):
+        super().__init__()
+        if type(path) is not str:
+            path = str(path)
         assert self.load(path)
 
     def encode_as_ids(self, text: str, add_bos=False, add_eos=False) -> List[int]:
@@ -255,15 +258,12 @@ class RawDialogReader:
     """
 
     def __init__(self, inp: Union[str, Path, TextIO, Iterator[str]],
-                 reset_on_scene=True,
-                 reset_on_event=True,
                  text_field: Field=None,
-                 char_field: LookupField=None):
+                 char_field: LookupField=None,
+                 max_seq_len: int = 100):
         """
 
-        :param inp:
-        :param reset_on_scene:
-        :param reset_on_event:
+        :param inp: dialog seq file
         :param text_field: provide this field if you want to map text to word ids.
          by default it splits words by white space and return words as sequence
         :param char_field: provide this field if you want to map character name to id.
@@ -274,15 +274,9 @@ class RawDialogReader:
             assert inp.exists()
             inp = IO.reader(inp).open()
         self.reader = inp
-
-        self.reset_chars = set()
-        if reset_on_event:
-            self.reset_chars.add('<event>')
-        if reset_on_scene:
-            self.reset_chars.add('<scene>')
-        assert self.reset_chars
         self.text_field = text_field
         self.char_field = char_field
+        self.max_seq_len = max_seq_len
 
     def __iter__(self):
         count = 0
@@ -297,19 +291,15 @@ class RawDialogReader:
                 continue
             parts = line.split("\t")
             raw_char, raw_text = parts[-2:]
-            uid = parts[0] if len(parts) > 0 else None
-            raw_char = raw_char.strip()
-            if raw_char in self.reset_chars and len(dialog) > 0:
-                yield dialog
-                count += 1
-                dialog = Dialog()
-            char = raw_char
+            uid = parts[0] if len(parts) > 2 else None
+            char = raw_char = raw_char.strip()
             if self.char_field:
                 char = self.char_field.encode_as_id(raw_char)
             if self.text_field:
                 seq = self.text_field.encode_as_ids(raw_text)
             else:
                 seq = raw_text.strip().split()
+            seq = seq[:self.max_seq_len]
             utter = Utterance(char, seq, raw_text=raw_text, raw_char=raw_char, uid=uid)
             dialog.append(utter)
         if len(dialog) > 0:
@@ -328,42 +318,66 @@ class DialogReader:
     This one works with processed data i.e. word ids
     """
 
-    def __init__(self, path: Path, char_field: LookupField,
-                 reset_on_scene=True, reset_on_event=True):
+    def __init__(self, path: Path, shuffle_buffer_size=500):
         """
         :param path: path to read TSV
-        :param char_field:
-        :param reset_on_scene:
-        :param reset_on_event:
         """
         assert path.exists()
         self.path = path
-        self.reset_chars = set()
-        if reset_on_event:
-            assert '<event>' in char_field
-            self.reset_chars.add(char_field['<event>'])
-        if reset_on_scene:
-            assert '<scene>' in char_field
-            self.reset_chars.add(char_field['<scene>'])
-        assert self.reset_chars
+        self.shuf_buf_size = shuffle_buffer_size
 
-    def __iter__(self):
+    @staticmethod
+    def read_all(path: Path):
         count = 0
-        with IO.reader(self.path) as reader:
+        with IO.reader(path) as reader:
             dialog = Dialog()
             for line in reader:
-                char, seq = line.split("\t")
-                char, seq = int(char), [int(x) for x in seq.strip().split()]
-                if char in self.reset_chars and len(dialog) > 0:
-                    yield dialog
-                    count += 1
-                    dialog = Dialog()
-
-                dialog.append(Utterance(char, seq))
-            if len(dialog):
+                line = line.strip()
+                if line:
+                    char, seq = line.split("\t")[-2:]
+                    char, seq = int(char), [int(x) for x in seq.strip().split()]
+                    dialog.append(Utterance(char, seq))
+                else:
+                    if len(dialog) > 0:
+                        yield dialog
+                        count += 1
+                        dialog = Dialog()
+            if len(dialog) > 0:
                 count += 1
                 yield dialog
         log.info(f"Read {count} dialogs")
+
+    @staticmethod
+    def buffered_shuffle(itr, buffer_size):
+        buffer = []
+        # A simple 3 stage algorithm for shuffling a stream using a fixed size buffer:
+        # 1. load initial buffer until full
+        # 2. shuffle, pop, yield and then append until the iterator becomes empty
+        # 3. shuffle, pop and yield until the buffer becomes empty
+        #  --> I don't guarantee uniform random shuffle
+
+        # Step: fill the buffer
+        while len(buffer) < buffer_size:
+            item = next(itr, None)
+            if item:
+                buffer.append(item)
+        # Step: Advance: remove one then add one,
+        item = next(itr, None)
+        while item:
+            random.shuffle(buffer)
+            yield buffer.pop(0)
+            buffer.append(item)
+            item = next(itr, None)
+
+        # step: empty the buffer
+        while len(buffer) > 0:
+            random.shuffle(buffer)
+            yield buffer.pop(0)
+
+    def __iter__(self):
+        dialogs = self.read_all(self.path)
+        dialogs = self.buffered_shuffle(dialogs, buffer_size=self.shuf_buf_size)
+        yield from dialogs
 
 
 @dataclass
