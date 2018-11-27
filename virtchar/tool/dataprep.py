@@ -357,7 +357,8 @@ class DialogReader:
         #  --> I don't guarantee uniform random shuffle
 
         # Step: fill the buffer
-        while len(buffer) < buffer_size:
+        item = object()
+        while len(buffer) < buffer_size and item:
             item = next(itr, None)
             if item:
                 buffer.append(item)
