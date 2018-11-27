@@ -15,7 +15,7 @@ optim:
     eps: 1.0e-09
     label_smoothing: 0.1
     lr: 0.1
-    warmup_steps: 200
+    warmup_steps: 4000
   name: ADAM
 trainer:
   characters:
