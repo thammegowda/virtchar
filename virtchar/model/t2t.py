@@ -236,9 +236,11 @@ class PositionwiseFeedForward(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    "Implement the PE function."
+    """
+    Implement the PE function.
+    """
 
-    def __init__(self, d_model, dropout, max_len=5000):
+    def __init__(self, d_model, dropout, max_len=800):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -253,7 +255,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        x = x + Variable(self.pe[:, :x.size(1)], requires_grad=False)
+        x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
 
 
@@ -267,15 +269,17 @@ class HieroTransformer(DialogModel):
                  ctx_encoder: Encoder,
                  decoder: Decoder,
                  combo_embs: ComboEmbeddings,
-                 generator: Generator):
-        super(HieroTransformer, self).__init__()
+                 generator: Generator,
+                 dropout: float):
+        super().__init__()
         self.utter_encoder = utter_encoder
         self.ctx_encoder = ctx_encoder
         self.decoder = decoder
         self.combo_embs: ComboEmbeddings = combo_embs
-        # self.char_embed = char_embed
         self.generator = generator
         self._model_dim = generator.d_model
+        # positional encoder for the chat sequence
+        self.posit_enc = PositionalEncoding(self._model_dim, dropout=dropout)
 
     @property
     def model_dim(self):
@@ -321,8 +325,8 @@ class HieroTransformer(DialogModel):
             tgt_seqs = torch.cat([bos_col, tgt_seqs], dim=1)
         dec_feats = self.decode(ctx_enc_outs, ctx_mask, tgt_seqs, batch.resp_chars)
         if add_bos:
-            # remove it
-            dec_feats = dec_feats[:, 1:]
+            # slide left;; remove the last time step
+            dec_feats = dec_feats[:, :-1]
         # this can be projected to vocabulary space to produce words
         return dec_feats
 
@@ -353,6 +357,7 @@ class HieroTransformer(DialogModel):
         # index_select works with vector, so we flatten and then restore
         chat_input = torch.index_select(padded_sent_repr, 0, chat_ctx_idx.view(-1))
         chat_input = chat_input.view(*chat_ctx_idx.shape, -1)
+        chat_input = self.posit_enc(chat_input)
 
         chat_mask = (chat_ctx_idx != 0).unsqueeze(1)
         chat_enc_outs = self.ctx_encoder(chat_input, chat_mask)
@@ -401,7 +406,8 @@ class HieroTransformer(DialogModel):
                                  ctx_encoder=ctx_encoder,
                                  decoder=decoder,
                                  combo_embs=text_emb,
-                                 generator=generator)
+                                 generator=generator,
+                                 dropout=dropout)
 
         # Tied embeddings
         if tied_emb:
