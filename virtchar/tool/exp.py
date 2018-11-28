@@ -107,6 +107,7 @@ class DialogExperiment:
                     parts = line.strip().split('\t')
                     if len(parts) >= 2:
                         yield parts[-2]
+
         stats = Counter(_read_char_names())
 
         stats = [(char_name, count) for char_name, count in stats.items() if count >= min_freq]
@@ -356,7 +357,8 @@ class DialogExperiment:
                                        max_ctx=self.max_ctx,
                                        max_dialogs=self.max_utters,
                                        max_utters=self.max_utters,
-                                       model_chars=None)
+                                       model_chars=None,
+                                       min_resp_len=self.min_resp_len)
         return LoopingIterable(train_data, total=loop_steps) if loop_steps > 0 else train_data
 
     def get_val_data(self) -> Iterator[DialogMiniBatch]:
@@ -387,3 +389,7 @@ class DialogExperiment:
     @property
     def max_utters(self):
         return self.config['trainer']['max_utters']
+
+    @property
+    def min_resp_len(self):
+        return self.config.get('trainer', {}).get('min_resp_len', -1)

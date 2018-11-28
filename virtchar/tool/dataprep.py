@@ -151,8 +151,8 @@ Terminology:
 class Utterance:
     char: Union[int, str]  # the character or speaker who said this
     text: Union[List[str], List[int]]  # the text content
-    raw_text: str = None       # In case you like to keep the original text line for inspection
-    raw_char: str = None       # in case you like to keep the original character name
+    raw_text: str = None  # In case you like to keep the original text line for inspection
+    raw_char: str = None  # in case you like to keep the original character name
     uid: Optional[str] = None  # In case you want to identify this by referencing to ext corpus
 
     def __len__(self):
@@ -160,7 +160,7 @@ class Utterance:
 
     @property
     def is_raw(self):
-        assert type(self.char) == type(self.text[0]) == type(self.text[-1]) # Just a shallow check
+        assert type(self.char) == type(self.text[0]) == type(self.text[-1])  # Just a shallow check
         return type(self.char) is str
 
 
@@ -207,14 +207,16 @@ class Dialog:
     def __iter__(self):
         return self.chat
 
-    def as_mini_chats(self, min_ctx: int, max_ctx: int, model_chars: Optional[Set] = None) -> \
-            Iterator[ChatRec]:
+    def as_mini_chats(self, min_ctx: int, max_ctx: int, model_chars: Optional[Set] = None,
+                      min_resp_len: int = -1) -> Iterator[ChatRec]:
         """
 
         :param min_ctx: minimum context size for the response
         :param max_ctx: maximum context size for the response
         :param model_chars: set of character whose responses you are trying to model
             if None is supplied (default), no filtering will be performed
+        :param min_resp_len: responses shorter than this will be skipped. value < 1 will disable
+            this filter
         :return:
         """
         assert 0 < min_ctx <= max_ctx
@@ -224,6 +226,9 @@ class Dialog:
             ctx = self.chat[start: idx]  # until this idx
             resp = self.chat[idx]
             if model_chars and resp.char not in model_chars:
+                continue
+            if min_resp_len > 0 and len(resp.text) < min_resp_len:
+                # ignore shorter responses
                 continue
             while len(ctx) >= min_ctx:
                 # shallow copy.copy is intentional,
@@ -243,10 +248,10 @@ class Dialog:
         if len(self) <= min_ctx:
             yield from []  # we need at least min_ctx + 1 utterances
 
-        for right in range(min_ctx, len(self)-1):
+        for right in range(min_ctx, len(self) - 1):
             left = max(0, right - max_ctx)
             ctx = self.chat[left: right]
-            resp = self.chat[right+1]
+            resp = self.chat[right + 1]
             if resp.char in test_chars:
                 yield ChatRec(ctx, resp)
 
@@ -258,8 +263,8 @@ class RawDialogReader:
     """
 
     def __init__(self, inp: Union[str, Path, TextIO, Iterator[str]],
-                 text_field: Field=None,
-                 char_field: LookupField=None,
+                 text_field: Field = None,
+                 char_field: LookupField = None,
                  max_seq_len: int = 100):
         """
 
@@ -528,7 +533,7 @@ class DialogBatchReader:
 
     def __init__(self, reader: DialogReader, min_ctx: int = 2, max_ctx: int = 10,
                  max_utters: int = 10, max_dialogs: int = 20, sort_desc: bool = True,
-                 pad=True, model_chars: Optional[Set] = None):
+                 pad=True, model_chars: Optional[Set] = None, min_resp_len: int=-1):
         assert 0 < min_ctx <= max_ctx
         assert 0 < max_utters <= max_dialogs
 
@@ -540,6 +545,9 @@ class DialogBatchReader:
         self.sort_desc = sort_desc
         self.pad = pad
         self.model_chars = model_chars
+        if min_resp_len > 0:
+            log.info(f"Ignoring responses shorter than {min_resp_len}")
+        self.min_resp_len = min_resp_len
 
     def __iter__(self):
         count = 0
@@ -554,7 +562,8 @@ class DialogBatchReader:
 
         for dialog in self.reader:
             for chat in dialog.as_mini_chats(min_ctx=self.min_ctx, max_ctx=self.max_ctx,
-                                             model_chars=self.model_chars):
+                                             model_chars=self.model_chars,
+                                             min_resp_len=self.min_resp_len):
                 utters.maybe_update(chat.context)  # this might exceed max_utters, but that's okay
                 utters.maybe_add(chat.response)
                 chats.append(chat)

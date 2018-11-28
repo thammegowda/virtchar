@@ -22,6 +22,7 @@ trainer:
   max_ctx: 50
   max_utters: 100
   min_ctx: 2
+  min_resp_len: 5
 prep:
   char_min_freq: 100
   finetune_dialogs: data/merged/friends.train.tok.simpl.tsv

@@ -582,7 +582,7 @@ class HieroTransformerTrainer(SteppedTrainer):
 
 
 def __test_model__():
-    work_dir = '/Users/tg/work/phd/cs644/project/virtchar/tmp.work.transformer'
+    work_dir = '/Users/tg/work/phd/cs644/project/virtchar/tmp.work.transformer.simpl'
     exp = DialogExperiment(work_dir, read_only=True)
     text_vocab = len(exp.text_field)
     char_vocab = len(exp.char_field)
