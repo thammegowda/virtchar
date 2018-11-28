@@ -6,6 +6,7 @@ from typing import Optional, Dict, Iterator, List, Tuple, Union, Any, Set
 import torch
 import random
 from collections import Counter
+import functools
 
 from virtchar import log, load_conf
 from virtchar.tool.dataprep import (
@@ -361,14 +362,17 @@ class DialogExperiment:
                                        min_resp_len=self.min_resp_len)
         return LoopingIterable(train_data, total=loop_steps) if loop_steps > 0 else train_data
 
+    @functools.lru_cache(maxsize=2)
     def get_val_data(self) -> Iterator[DialogMiniBatch]:
         reader = DialogReader(self.valid_file)
-        return DialogBatchReader(reader,
-                                 min_ctx=self.min_ctx,
-                                 max_ctx=self.max_ctx,
-                                 max_dialogs=self.max_utters,
-                                 max_utters=self.max_utters,
-                                 model_chars=None)
+        reader = DialogBatchReader(reader,
+                                   min_ctx=self.min_ctx,
+                                   max_ctx=self.max_ctx,
+                                   max_dialogs=self.max_utters,
+                                   max_utters=self.max_utters,
+                                   model_chars=None,
+                                   min_resp_len=self.min_resp_len)
+        return list(reader)  # keep it in memory
 
     @property
     def model_characters(self) -> Set[int]:
