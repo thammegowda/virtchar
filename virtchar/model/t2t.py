@@ -3,12 +3,11 @@
 import copy
 import math
 import time
-from typing import Callable, Optional, Iterator
+from typing import Callable, Optional, Iterator, Mapping
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 from tqdm import tqdm
 
 from virtchar import device, log, my_tensor as tensor, DialogExperiment
@@ -41,9 +40,15 @@ class ComboEmbeddings(nn.Module):
         super().__init__()
 
         self.text_emb = nn.Embedding(text_vocab, d_model)
-        self.char_emb_size = char_emb_size if char_emb_size else d_model
-        self.char_emb = nn.Embedding(char_vocab, self.char_emb_size)
-        self.merge = nn.Linear(self.char_emb_size + d_model, d_model)
+        self.char_emb_size = char_emb_size
+        if char_emb_size > 0: # Zero or a negative value disables this
+            log.info(f"Character embeddings enabled: dim={char_emb_size}")
+            self.char_emb = nn.Embedding(char_vocab, self.char_emb_size)
+            self.merge = nn.Linear(self.char_emb_size + d_model, d_model)
+        else:
+            log.info("Character embeddings disabled")
+            self.char_emb = None
+            self.merge = None
         self.d_model = d_model
 
     def forward(self, pair):
@@ -53,17 +58,18 @@ class ComboEmbeddings(nn.Module):
         assert text_seqs.shape[0] == chars.shape[0]
         batch_size, seq_len = text_seqs.shape
         text_embedded = self.text_emb(text_seqs) * math.sqrt(self.d_model)
-        char_embedded = self.char_emb(chars) * math.sqrt(self.char_emb_size)
-
         text_embedded = text_embedded.view(batch_size, seq_len, self.d_model)
-        char_embedded = char_embedded.view(batch_size, 1, self.char_emb_size)
-        # repeat the character embedding for each time step in sequence
-        char_embedded = char_embedded.expand(batch_size, seq_len, self.char_emb_size)
-
-        # concat word embedding and character embedding along the last dimension
-        embedded = torch.cat([text_embedded, char_embedded], dim=-1)
-
-        return self.merge(embedded)
+        if self.char_emb is None:
+            embedded = text_embedded
+        else:
+            char_embedded = self.char_emb(chars) * math.sqrt(self.char_emb_size)
+            char_embedded = char_embedded.view(batch_size, 1, self.char_emb_size)
+            # repeat the character embedding for each time step in sequence
+            char_embedded = char_embedded.expand(batch_size, seq_len, self.char_emb_size)
+            # concat word embedding and character embedding along the last dimension
+            embedded = torch.cat([text_embedded, char_embedded], dim=-1)
+            embedded = self.merge(embedded)
+        return embedded
 
 
 class Generator(nn.Module):
@@ -268,14 +274,16 @@ class HieroTransformer(DialogModel):
     def __init__(self, utter_encoder: Encoder,
                  ctx_encoder: Encoder,
                  decoder: Decoder,
-                 combo_embs: ComboEmbeddings,
+                 src_inp_embs: ComboEmbeddings,
+                 tgt_inp_embs: ComboEmbeddings,
                  generator: Generator,
                  dropout: float):
         super().__init__()
         self.utter_encoder = utter_encoder
         self.ctx_encoder = ctx_encoder
         self.decoder = decoder
-        self.combo_embs: ComboEmbeddings = combo_embs
+        self.src_inp_embs: ComboEmbeddings = src_inp_embs
+        self.tgt_inp_embs: ComboEmbeddings = tgt_inp_embs
         self.generator = generator
         self._model_dim = generator.d_model
         # positional encoder for the chat sequence
@@ -335,7 +343,7 @@ class HieroTransformer(DialogModel):
         n_utters, max_len = utter_seqs.shape
         utter_mask = (utter_seqs != PAD_IDX)
         # :: level 1 :: prepare
-        embedded = self.combo_embs((utter_seqs, chars)).view(n_utters, max_len, -1)
+        embedded = self.src_inp_embs((utter_seqs, chars)).view(n_utters, max_len, -1)
 
         utter_encoded = self.utter_encoder(embedded, utter_mask.unsqueeze(1))
         # level 1 :: post process
@@ -365,7 +373,7 @@ class HieroTransformer(DialogModel):
 
     def decode(self, memory, src_mask, tgt_seqs, chars):
         tgt_mask = self.mask_pad_future(tgt_seqs)
-        tgt_prev_embs = self.combo_embs((tgt_seqs, chars))
+        tgt_prev_embs = self.tgt_inp_embs((tgt_seqs, chars))
         return self.decoder(tgt_prev_embs, memory, src_mask, tgt_mask)
 
     @staticmethod
@@ -376,7 +384,8 @@ class HieroTransformer(DialogModel):
                    ff_size=2048,
                    n_heads=8,
                    dropout=0.1,
-                   tied_emb='three-way'):
+                   char_emb_size=50,
+                   tied_emb=None):
         "Helper: Construct a model from hyper parameters."
 
         # args for reconstruction of model
@@ -387,7 +396,8 @@ class HieroTransformer(DialogModel):
                 'ff_size': ff_size,
                 'n_heads': n_heads,
                 'dropout': dropout,
-                'tied_emb': tied_emb
+                'tied_emb': tied_emb,
+                'char_emb_size': char_emb_size
                 }
         c = copy.deepcopy
         attn = MultiHeadedAttention(n_heads, hid_size)
@@ -398,20 +408,26 @@ class HieroTransformer(DialogModel):
         decoder = Decoder(DecoderLayer(hid_size, c(attn), c(attn), c(ff), dropout), n_layers)
 
         # char_emb = Embeddings(char_emb_size, char_vocab)
-        text_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab),
+        text_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab,
+                                                 char_emb_size=char_emb_size),
                                  PositionalEncoding(hid_size, dropout))
         generator = Generator(hid_size, text_vocab)
 
         model = HieroTransformer(utter_encoder=utter_encoder,
                                  ctx_encoder=ctx_encoder,
                                  decoder=decoder,
-                                 combo_embs=text_emb,
+                                 src_inp_embs=text_emb,
+                                 tgt_inp_embs=c(text_emb),
                                  generator=generator,
                                  dropout=dropout)
 
         # Tied embeddings
         if tied_emb:
-            model.generator.proj.weight = model.combo_embs[0].text_emb.weight
+            log.info("Tying embeddings : tgtout == tgtinp")
+            model.generator.proj.weight = model.tgt_inp_embs[0].text_emb.weight
+            if tied_emb == 'three-way':
+                log.info("Tying embeddings : srcinp == tgtinp")
+                model.src_inp_embs[0].text_emb.weight = model.tgt_inp_embs[0].text_emb.weight
 
         # Initialize parameters with Glorot / fan_avg.
         for p in model.parameters():
@@ -534,6 +550,12 @@ class HieroTransformerTrainer(SteppedTrainer):
         score = total_loss / total_tokens
         return score
 
+    def diff(self, before: Mapping, after: Mapping):
+        assert len(before.keys() & after.keys()) == len(before) == len(after)
+        for k in before.keys():
+            res = (before[k] - after[k]).pow(2).sum()
+            print(f"{k}::{res}")
+
     def train(self, steps: int, check_point: int,
               check_pt_callback: Optional[Callable] = None,
               fine_tune=False, **args):
@@ -556,10 +578,11 @@ class HieroTransformerTrainer(SteppedTrainer):
                 batch: DialogMiniBatch = batch  # type annotation
                 self.model.zero_grad()
                 out = self.model(batch)
-
                 num_toks = batch.tot_resp_toks.float().item()
-                # skip the BOS token in  batch.y_seqs
+                # before = copy.deepcopy(self.model.state_dict())
                 loss = self.loss_func(out, batch.resp_seqs, num_toks, True)
+                # after = copy.deepcopy(self.model.state_dict())
+                # self.diff(before, after)
                 self.tbd.add_scalars('training', {'step_loss': loss,
                                                   'learn_rate': self.opt.curr_lr},
                                      self.opt.curr_step)
@@ -595,7 +618,8 @@ def __test_model__():
                                            n_layers=4,
                                            hid_size=128,
                                            ff_size=256,
-                                           n_heads=4)
+                                           n_heads=4,
+                                           char_emb_size=0)
 
     trainer = HieroTransformerTrainer(exp=exp, model=model, warmup_steps=200)
 

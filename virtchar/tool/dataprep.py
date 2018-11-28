@@ -252,7 +252,7 @@ class Dialog:
             left = max(0, right - max_ctx)
             ctx = self.chat[left: right]
             resp = self.chat[right + 1]
-            if resp.char in test_chars:
+            if not test_chars or resp.char in test_chars:
                 yield ChatRec(ctx, resp)
 
 
@@ -323,7 +323,7 @@ class DialogReader:
     This one works with processed data i.e. word ids
     """
 
-    def __init__(self, path: Path, shuffle_buffer_size=5000):
+    def __init__(self, path: Path, shuffle_buffer_size=50000):
         """
         :param path: path to read TSV
         """
