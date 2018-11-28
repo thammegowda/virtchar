@@ -201,7 +201,7 @@ class Decoder:
         return selected.view(-1, x.size(1))
 
     def beam_decode(self, batch: DialogMiniBatch, max_len=80, beam_size=default_beam_size,
-                    num_hyp=None,
+                    num_hyp=None, skip_top=4,
                     **args) -> List[List[Hypothesis]]:
         """
         :param batch: input batch of sequences
@@ -209,6 +209,7 @@ class Decoder:
         :param beam_size: beam size
         :param num_hyp: number of hypothesis in each beam to return
         :param args:
+        :param skip_top: number of top beams to skip
         :return: List of num_hyp Hypothesis for each sequence in the batch.
          Each hypothesis consists of score and a list of word indexes.
         """
@@ -234,18 +235,26 @@ class Decoder:
         beamed_scores = torch.zeros((beamed_batch_size, 1), device=device)
 
         beam_active = torch.ones((beamed_batch_size, 1), dtype=torch.uint8, device=device)
+
         # zeros means ended, one means active
         for t in range(1, max_len + 1):
             if beam_active.sum() == 0:
                 break
+
+            # ignoring top beams, to increase diversity. decrease monotonically until skip_top
+            skip_t = max(skip_top - t, 0)
+
             # [batch*beam, Vocab]
             log_prob = generator.generate_next(beamed_ys)
 
-            # broad cast scores along row (broadcast) and sum  log probabilities
+            # broad cast scores along row (broadcast) and sum log probabilities
             next_scores = beamed_scores + beam_active.float() * log_prob  # Zero out inactive beams
 
-            top_scores, nxt_idx = next_scores.topk(k=beam_size,
-                                                   dim=-1)  # [batch*beam, beam],[batch*beam, beam]
+            # [batch*beam, beam],[batch*beam, beam]
+            top_scores, nxt_idx = next_scores.topk(k=beam_size + skip_t, dim=-1)
+
+            top_scores, nxt_idx = top_scores[:, skip_t:], nxt_idx[:, skip_t:]
+
             # Now we got beam_size*beam_size heads, task: shrink it to beam_size
             # Since the ys will change, after re-scoring, we will make a new tensor for new ys
             new_ys = torch.full(size=(beamed_batch_size, beamed_ys.size(1) + 1),
@@ -454,13 +463,14 @@ class Decoder:
                 [(c, c.as_dialog_mini_batch()) for c in chats]
             # One chat in batch. Should/can be improved later
             for j, (chat, batch) in enumerate(batches):
-                log.info(f"dialog: {i}: chat: {j} ::"
-                         f" {chat.response.raw_char}: {chat.response.raw_text}")
+                log.info(f"dialog: {i}: chat: {j} :: \n"
+                         f"MSG: {chat.context[-1].raw_char}: {chat.context[-1].raw_text}\n"
+                         f"RSP: {chat.response.raw_char}: {chat.response.raw_text}")
 
                 result = self.generate_chat(batch, **args)
                 num_hyp = args['num_hyp']
                 out_line = '\n'.join(f'{hyp}\t{score:.4f}' for score, hyp in result) + '\n'
-                log.info(f"OUT: {i}: {out_line}")
+                log.info(f"OUT:\n{out_line}")
                 if out:
                     out.write(out_line)
                     if num_hyp > 1:

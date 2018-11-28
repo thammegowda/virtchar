@@ -157,7 +157,8 @@ class SteppedTrainer:
             if last_model:
                 self.start_step = last_step + 1
                 log.info(f"Resuming training from step:{self.start_step}, model={last_model}")
-                state = torch.load(last_model)
+                map_location = None if torch.cuda.is_available() else 'cpu'
+                state = torch.load(last_model, map_location=map_location)
                 model_state = state['model_state'] if 'model_state' in state else state
                 if 'optim_state' in state:
                     optim_state = state['optim_state']
@@ -202,19 +203,20 @@ class SteppedTrainer:
             from virtchar.use.decoder import Decoder
             self.decoder = Decoder.new(self.exp, self.model)
 
-    def show_samples(self, beam_size=5, num_hyp=5, max_len=30):
+    def show_samples(self, beam_size=5, num_hyp=5, max_len=30, skip_top=0):
         """
         Logs the output of model (at this stage in training) to a set of samples
         :param beam_size: beam size
         :param num_hyp: number of hypothesis to output
         :param max_len: maximum length to decode
+        :param skip_top: number of top beams to skip (to improve diversity)
         :return:
         """
         if not self.samples:
             log.info("No samples are chosen by the experiment")
             return
         self.decoder.decode_dialogs(self.samples, out=None, beam_size=beam_size,
-                                    num_hyp=num_hyp, max_len=max_len)
+                                    num_hyp=num_hyp, max_len=max_len, skip_top=skip_top)
 
     def make_check_point(self, val_data: Iterator[DialogMiniBatch], train_loss: float,
                          keep_models: int):
