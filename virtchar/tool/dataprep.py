@@ -546,7 +546,7 @@ class DialogBatchReader:
         self.pad = pad
         self.model_chars = model_chars
         if min_resp_len > 0:
-            log.info(f"Ignoring responses shorter than {min_resp_len}")
+            log.info(f"Ignoring responses shorter than {min_resp_len} from {reader.path}")
         self.min_resp_len = min_resp_len
 
     def __iter__(self):
