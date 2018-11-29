@@ -622,9 +622,16 @@ def __test_model__():
                                            char_emb_size=0)
 
     trainer = HieroTransformerTrainer(exp=exp, model=model, warmup_steps=200)
-
     trainer.train(steps=steps, check_point=check_pt)
 
 
+def _test_samples_():
+    work_dir = '/Users/tg/work/phd/cs644/project/virtchar/runs/008-merged-tfm-nochar-1ctx'
+    exp = DialogExperiment(work_dir, read_only=True)
+    trainer = HieroTransformerTrainer(exp=exp)
+    trainer.show_samples(beam_size=8, num_hyp=8, skip_top=1)
+
+
 if __name__ == '__main__':
-    __test_model__()
+    #__test_model__()
+    _test_samples_()
