@@ -1,7 +1,6 @@
 # Retrieval bot using pretrained sentence embeddings
 
-Using https://github.com/facebookresearch/InferSentpre trained models
-
+Using https://github.com/facebookresearch/InferSent pre-trained models
 
 
 
