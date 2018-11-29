@@ -15,6 +15,12 @@ import sys
 import logging as log
 from virtchar.utils import IO
 
+device_name = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+log.info(f"Device = {device_name}")
+device = torch.device(device_name)
+cpu_device = torch.device('cpu')
+
+
 VERSION = 2
 MODEL_CONF = {'bsize': 64, 'word_emb_dim': 300, 'enc_lstm_dim': 2048,
               'pool_type': 'max', 'dpout_model': 0.0, 'version': VERSION}
@@ -33,9 +39,17 @@ class SentenceEncoder:
 
         self.model.load_state_dict(state['model'])
         self.model.word_vec = state['word_vec']
+        self.maybe_gpu()
 
-    def encode(self, sentences, tokenize=True):
-        return self.model.encode(sentences, tokenize)
+    def encode(self, sentences, tokenize=True, **kwargs):
+        return self.model.encode(sentences, tokenize=tokenize, **kwargs)
+
+    def maybe_gpu(self, device=device):
+        self.model = self.model.to(device)
+
+    def to_cpu(self):
+        self.model = self.model.to(cpu_device)
+
 
     @staticmethod
     def prepare(model_path: str, word_vecs: str, out_path: str,

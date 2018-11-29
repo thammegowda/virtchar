@@ -55,6 +55,11 @@ class ChatBot:
         for idx in closest_resp_idx:
             print(self.resps[idx])
 
+    def maybe_gpu(self):
+        self.enc.maybe_gpu()
+    def to_cpu(self):
+        self.enc.to_cpu()
+
     @classmethod
     def prepare(cls, msgs: List[str], resps: List[str], sent_enc_model: str):
         assert len(msgs) == len(resps)
@@ -64,13 +69,15 @@ class ChatBot:
             # that's why  I am not using dictionary mapping, instead using two lists
             log.warning(f"Found Duplicate messages.  {uniq_msgs} are unique of {len(msgs)}")
         senc = SentenceEncoder(sent_enc_model)
-        msg_reprs = senc.encode(msgs)
+        msg_reprs = senc.encode(msgs, verbose=True)
         return cls(senc, msg_reprs, resps, msgs)
 
     def save(self, path):
         log.info(f"Storing to {path}")
         with open(path, 'wb') as f:
+            self.to_cpu() # move to CPU before saving
             pickle.dump(self, f)
+            self.maybe_gpu()
 
     @classmethod
     def load(cls, path):
@@ -78,6 +85,7 @@ class ChatBot:
         with open(path, 'rb') as f:
             obj = pickle.load(f)
         assert type(obj) is cls
+        obj.maybe_gpu()
         return obj
 
 
@@ -99,10 +107,10 @@ def read_msg_resp(path: str):
         return _read(path)
 
 
-def prepare(enc_path: str, chats, out_path):
+def prepare(enc_path: str, chats, model_path):
     msgs, resps = read_msg_resp(chats)
     bot = ChatBot.prepare(msgs, resps, sent_enc_model=enc_path)
-    bot.save(out_path)
+    bot.save(model_path)
 
 
 def chat_console(model_path, k=2, **args):
