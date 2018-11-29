@@ -11,6 +11,7 @@ from virtchar import log
 import pickle
 import argparse
 import traceback
+from typing import Dict
 import sys
 
 """
@@ -41,6 +42,7 @@ class ChatBot:
         self.msg_reprs = msg_reprs
         self.resps = resps
         self.msgs = msgs
+        self.enc.maybe_gpu()
 
     def find_closest(self, msg_rep, k):
         # TODO change it to cosine
@@ -48,17 +50,11 @@ class ChatBot:
         top_k = np.argsort(np.sqrt((np.sum(squared_err, axis=1))))[:k]
         return top_k
 
-    def respond(self, query, k):
+    def respond(self, query, k) -> List[str]:
         other_query = [query]
         query_embedding = self.enc.encode(other_query)
-        closest_resp_idx = self.find_closest(query_embedding, k + 2)
-        for idx in closest_resp_idx:
-            print(self.resps[idx])
-
-    def maybe_gpu(self):
-        self.enc.maybe_gpu()
-    def to_cpu(self):
-        self.enc.to_cpu()
+        closest_resp_idx = self.find_closest(query_embedding, k)
+        return [self.resps[idx] for idx in closest_resp_idx]
 
     @classmethod
     def prepare(cls, msgs: List[str], resps: List[str], sent_enc_model: str):
@@ -74,18 +70,25 @@ class ChatBot:
 
     def save(self, path):
         log.info(f"Storing to {path}")
+        # The reason for doing this crazy stuff is to increase the portability of models
+        # if we simply dump object as pickle, then torch version must be matched during re-loading
+        # So we dump only the state params and arrays
         with open(path, 'wb') as f:
-            self.to_cpu() # move to CPU before saving
-            pickle.dump(self, f)
-            self.maybe_gpu()
+            self.enc.to_cpu()
+            state = dict(enc_state=self.enc.get_state(),
+                         msg_reprs=self.msg_reprs,
+                         resps=self.resps,
+                         msgs=self.msgs)
+            pickle.dump(state, f)
+            self.enc.maybe_gpu()
 
     @classmethod
     def load(cls, path):
         log.info(f"Loading from  {path}")
         with open(path, 'rb') as f:
-            obj = pickle.load(f)
-        assert type(obj) is cls
-        obj.maybe_gpu()
+            state: Dict = pickle.load(f)
+            enc = SentenceEncoder(state_dict=state.pop('enc_state'))
+            obj: ChatBot = cls(sent_enc=enc, **state)
         return obj
 
 
@@ -134,7 +137,7 @@ def chat_console(model_path, k=2, **args):
             state = '  '.join(f'{k}={v}' for k, v in args.items())
             print('\t|' + state)
         print_state = False
-        line = input('Message: ')
+        line = input('<<: ')
         line = line.strip()
         if not line:
             continue
@@ -143,9 +146,14 @@ def chat_console(model_path, k=2, **args):
                 break
             elif line == ':help':
                 print_cmds()
+            elif line.startswith(':k='):
+                k = int(line.replace(':k=', ''))
+                args['k'] = k
             else:
                 msg = line
-                bot.respond(msg, k=k)
+                topk_resps = bot.respond(msg, k=k)
+                for i, r in enumerate(topk_resps):
+                    print(f">> {i:2d}: {r}")
         except EOFError as e1:
             break
         except Exception as e2:

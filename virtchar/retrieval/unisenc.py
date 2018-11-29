@@ -31,10 +31,14 @@ class SentenceEncoder:
     Universal sentence encoder, based on https://github.com/facebookresearch/InferSent
     """
 
-    def __init__(self, state_path):
+    def __init__(self, state_path=None, state_dict=None):
+        assert bool(state_path) != bool(state_dict), 'Either state_path or state_dict must be there'
         self.model = InferSent(config=MODEL_CONF)
-        log.info(f"Loading state from {state_path}")
-        state = torch.load(state_path)
+        if state_path:
+            log.info(f"Loading state from {state_path}")
+            state = torch.load(state_path)
+        else:
+            state = state_dict
         assert 'model' in state and 'word_vec' in state  # created by self.prepare() method
 
         self.model.load_state_dict(state['model'])
@@ -49,7 +53,6 @@ class SentenceEncoder:
 
     def to_cpu(self):
         self.model = self.model.to(cpu_device)
-
 
     @staticmethod
     def prepare(model_path: str, word_vecs: str, out_path: str,
@@ -81,10 +84,19 @@ class SentenceEncoder:
             log.info(f"Pruning vocabulary to top {max_vocab} types")
             model.build_vocab_k_words(K=max_vocab)
         log.info(f"Saving at {out_path}")
-        # by default InferSent doesnt pickle word_vec, so this hack
-        state = {'model': model.state_dict(),
-                 'word_vec': model.word_vec}
+
+        state = SentenceEncoder._get_state(model)
         torch.save(state, out_path)
+
+    @classmethod
+    def _get_state(cls, model):
+        if isinstance(model, cls):
+            model = model.model
+        # by default InferSent doesnt pickle word_vec, so this hack
+        return {'model': model.state_dict(), 'word_vec': model.word_vec}
+
+    def get_state(self):
+        return self._get_state(self)
 
 
 def read_lines_reader(reader):
