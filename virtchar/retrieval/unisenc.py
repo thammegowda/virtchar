@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Author: Thamme Gowda [tg (at) isi (dot) edu] 
+# Author: Thamme Gowda [tg (at) isi (dot) edu]
 # Created: 11/28/18
 
 # Universal Sentence Encoder
@@ -59,8 +59,8 @@ class SentenceEncoder:
         log.info(f"Loading word vecs from {out_path}")
         model.set_w2v_path(word_vecs)
         if sentences:
-            if type(sentences) is str:
-                sentences = read_lines(sentences)
+            if type(sentences) is not list:
+                sentences = list(read_lines(sentences))
             log.info("Building vocabulary from sentences")
             model.build_vocab(sentences, tokenize=True)
         if max_vocab:
@@ -83,7 +83,7 @@ def read_lines_reader(reader):
 def read_lines(path):
     if type(path) is str:
         with IO.reader(path) as reader:
-            return read_lines_reader(reader)
+            yield from read_lines_reader(reader)
     else:
         return read_lines_reader(path)
 
