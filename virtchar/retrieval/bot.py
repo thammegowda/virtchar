@@ -196,9 +196,10 @@ def chat_console(model_path, k=2, metric='L2', imitate=False, **args):
                 args['imitate'] = imitate = not imitate
                 print_state = True
             else:
-                msg = line
-
-                topk_resps = bot.message_to_response(msg, metric=metric, k=k)
+                if imitate:
+                    topk_resps = bot.response_to_response(line, metric=metric, k=k)
+                else:
+                    topk_resps = bot.message_to_response(line, metric=metric, k=k)
                 for i, (score, resp) in enumerate(topk_resps):
                     print(f">> {i:2d}: {score:g} : {resp}")
         except EOFError as e1:
