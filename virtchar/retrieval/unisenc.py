@@ -36,7 +36,7 @@ class SentenceEncoder:
         self.model = InferSent(config=MODEL_CONF)
         if state_path:
             log.info(f"Loading state from {state_path}")
-            state = torch.load(state_path)
+            state = torch.load(state_path, map_location=device)
         else:
             state = state_dict
         assert 'model' in state and 'word_vec' in state  # created by self.prepare() method

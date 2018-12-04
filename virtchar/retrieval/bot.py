@@ -110,18 +110,17 @@ class ChatBot:
         # The reason for doing this crazy stuff is to increase the portability of models
         # if we simply dump object as pickle, then torch version must be matched during re-loading
         # So we dump only the state params and arrays
-        state = dict(enc_state=self.enc.get_state(),
-                     msg_reprs=self.msg_reprs,
+        state = dict(msg_reprs=self.msg_reprs,
                      resp_reprs=self.resp_reprs,
                      resps=self.resps,
                      msgs=self.msgs)
         torch.save(state, path)
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path, enc_path):
         log.info(f"Loading from  {path}")
         state: Dict = torch.load(path, map_location=torch.device('cpu'))
-        enc = SentenceEncoder(state_dict=state.pop('enc_state'))
+        enc = SentenceEncoder(state_path=enc_path)
         obj: ChatBot = cls(sent_enc=enc, **state)
         return obj
 
@@ -150,8 +149,8 @@ def prepare(enc_path: str, chats, model_path):
     bot.save(model_path)
 
 
-def chat_console(model_path, k=2, metric='L2', imitate=False, **args):
-    bot: ChatBot = ChatBot.load(model_path)
+def chat_console(model_path, enc_path, k=2, metric='L2', imitate=False, **args):
+    bot: ChatBot = ChatBot.load(model_path, enc_path)
     import readline
     helps = [(':quit', 'Exit'),
              (':help', 'Print this help message'),
@@ -211,20 +210,19 @@ def chat_console(model_path, k=2, metric='L2', imitate=False, **args):
 
 def main():
     par = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    par.add_argument('-ep', '--enc-path', required=True,
+                     help='path to SentenceEncoder state')
+    par.add_argument('-mp', '--model-path', required=True,
+                     help='path to the Bot model')
+
     sub_par = par.add_subparsers(dest='cmd')
     sub_par.required = True
-
     prep_par = sub_par.add_parser('prep')
-    prep_par.add_argument('-ep', '--enc-path', required=True,
-                          help='path to SentenceEncoder state')
-    prep_par.add_argument('-mp', '--model-path', required=True,
-                          help='path to store Bot model')
     prep_par.add_argument('-c', '--chats', help='Training chats: Message \\t Response',
                           default=sys.stdin)
 
     chat_par = sub_par.add_parser('chat')
-    chat_par.add_argument('-mp', '--model-path', required=True,
-                          help='Model state adapted from "prep"')
+
     args = vars(par.parse_args())
     {
         'chat': chat_console,
