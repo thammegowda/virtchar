@@ -22,33 +22,36 @@ cd .. # go back to root dir
 
 ### b. Get all the training text for vocabulary
 ```bash
-dir=data/merged  # point to data dir
-cut -f3 $dir/friends.train.tok.simpl.tsv > $dir/friends.train.tok.simpl.txt
+mkdir data/retrieval
+cut -f3 data/friends/friends.train.raw.tsv > data/retrieval/friends.train.raw.txt
 ```
 
 ### c. prepare a sentence encoder model
 
 ```bash
+# InferSent is a submodule
+git submodule init
+
 # Add the virchar and InferSent git repo to PYTHONPATH
-export PYTHONPATH=.:InferSent
+export PYTHONPATH=$PWD:$PWD/InferSent
 
 python -m virtchar.retrieval.unisenc prep \
  -i pretrained/infersent2.pkl \
  -v pretrained/crawl-300d-2M.vec \
- -o botmodels/infersent2.updated.pkl \
- -s data/friends/friends.train.tok.txt
+ -o botmodels/infersent2.wvec.pkl \
+ -s data/retrieval/friends.train.raw.txt
 ```
 
 ## 2. Filter message-response pair for characters
 
 ```bash
-idir=data/merged
+idir=data/friends
 odir=data/chars
-for ch in chandler monica joey ross rachel phoebe; do
+for ch in Chandler Monica Joey Ross Rachel Phoebe; do
   for sp in train test dev; do
     echo $ch $sp
-    python -m virtchar.tool.filter_pairs $ch -i $idir/friends.$sp.tok.simpl.tsv \
-           -o $odir/$ch.$sp.msg-resp.tok.simpl.tsv
+    python -m virtchar.tool.filter_pairs $ch -i $idir/friends.$sp.raw.tsv \
+           -o $odir/$ch.$sp.msg-resp.raw.tsv
   done
 done
 ```
@@ -56,15 +59,29 @@ done
 ## 3. Train Chat Bot Models
 
 ```
-bot=chandler
+bot=Chandler
 python -m virtchar.retrieval.bot prep \
- -ep botmodels/infersent2.updated.pkl -mp botmodels/$bot.bot.pkl \
- -c data/chars/$bot.train.msg-resp.tok.simpl.tsv
+ -ep botmodels/infersent2.wvec.pkl -mp botmodels/$bot.bot.pkl \
+ -c data/chars/$bot.train.msg-resp.raw.tsv
+```
+
+Make all other bots too, make sure to run this on GPU, because it takes lot of time on CPU.
+
+```
+for bot in Monica Ross Rachel Joey Phoebe; do
+  echo "Making $bot";
+  python -m virtchar.retrieval.bot prep \
+         -ep botmodels/infersent2.wvec.pkl \
+         -mp botmodels/$bot.bot.pkl \
+         -c data/chars/$bot.train.msg-resp.raw.tsv
+done
 ```
 
 ## 4. Chat
 
 ```bash
-bot=chandler
+bot=Chandler
 python -m virtchar.retrieval.bot chat -mp botmodels/$bot.bot.pkl
 ```
+
+
