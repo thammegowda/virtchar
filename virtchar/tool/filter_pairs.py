@@ -37,7 +37,7 @@ def filter_pairs(inp, character):
         if should_skip:
             continue
 
-        if speaker == character:
+        if character == '<all>' or speaker == character:
             if msg:
                 yield msg, resp
         msg = resp
@@ -65,7 +65,9 @@ def main(inp, out, character):
 if __name__ == '__main__':
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('character', type=str,
-                   help='name of character who\'s dialog you are interested in training.')
+                   help='name of character who\'s dialog you are interested in training. '
+                        'If you dont want to filter a specific character set "<all>" '
+                        ' (with quotes)')
     p.add_argument('-i', '--inp', type=argparse.FileType('r'), default=sys.stdin,
                    help='Input file path; Character \\t Utterance per line.'
                         ' A blank line must separate two dialogs')
