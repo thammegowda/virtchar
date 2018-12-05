@@ -359,7 +359,8 @@ class DialogExperiment:
                                        max_dialogs=self.max_utters,
                                        max_utters=self.max_utters,
                                        model_chars=None,
-                                       min_resp_len=self.min_resp_len)
+                                       min_resp_len=self.min_resp_len,
+                                       no_repeat=self.no_repeat)
         return LoopingIterable(train_data, total=loop_steps) if loop_steps > 0 else train_data
 
     @functools.lru_cache(maxsize=2)
@@ -371,7 +372,8 @@ class DialogExperiment:
                                    max_dialogs=self.max_utters,
                                    max_utters=self.max_utters,
                                    model_chars=None,
-                                   min_resp_len=self.min_resp_len)
+                                   min_resp_len=self.min_resp_len,
+                                   no_repeat=self.no_repeat)
         return list(reader)  # keep it in memory
 
     @property
@@ -397,3 +399,7 @@ class DialogExperiment:
     @property
     def min_resp_len(self):
         return self.config.get('trainer', {}).get('min_resp_len', -1)
+
+    @property
+    def no_repeat(self):
+        return self.config.get('trainer', {}).get('no_repeat', False)

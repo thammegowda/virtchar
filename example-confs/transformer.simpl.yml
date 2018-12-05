@@ -19,9 +19,11 @@ optim:
   name: ADAM
 trainer:
   max_chats: 100
-  max_ctx: 50
+  max_ctx: 10
   max_utters: 100
   min_ctx: 2
+  no_repeat: true
+
 prep:
   char_min_freq: 500
   finetune_dialogs: data/friends/friends.train.tok.simpl.tsv

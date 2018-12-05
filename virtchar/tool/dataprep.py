@@ -208,7 +208,7 @@ class Dialog:
         return self.chat
 
     def as_mini_chats(self, min_ctx: int, max_ctx: int, model_chars: Optional[Set] = None,
-                      min_resp_len: int = -1) -> Iterator[ChatRec]:
+                      min_resp_len: int = -1, no_repeat=False) -> Iterator[ChatRec]:
         """
 
         :param min_ctx: minimum context size for the response
@@ -217,11 +217,12 @@ class Dialog:
             if None is supplied (default), no filtering will be performed
         :param min_resp_len: responses shorter than this will be skipped. value < 1 will disable
             this filter
+        :param no_repeat: do not repeat chat with smaller ctx window
         :return:
         """
         assert 0 < min_ctx <= max_ctx
 
-        for idx in range(len(self)):
+        for idx in range(min_ctx-1, len(self)):
             start = max(0, idx - max_ctx)
             ctx = self.chat[start: idx]  # until this idx
             resp = self.chat[idx]
@@ -234,8 +235,11 @@ class Dialog:
                 # shallow copy.copy is intentional,
                 #  copy.deepcopy mess the id based hashing, so don't do that
                 yield ChatRec(copy.copy(ctx), resp)
-                # Slide the window, by removing the left most
-                ctx.pop(0)
+                if no_repeat:   # don't repeat this with smaller ctx size
+                    break
+                else:
+                    # Slide the window, by removing the left most
+                    ctx.pop(0)
 
     def as_test_chats(self, min_ctx: int, max_ctx: int, test_chars: Set):
         """
@@ -245,15 +249,13 @@ class Dialog:
         :return: an iterator of ChatRec
         """
         assert 0 < min_ctx <= max_ctx
-        if len(self) <= min_ctx:
-            yield from []  # we need at least min_ctx + 1 utterances
-
-        for right in range(min_ctx, len(self) - 1):
-            left = max(0, right - max_ctx)
-            ctx = self.chat[left: right]
-            resp = self.chat[right + 1]
-            if not test_chars or resp.char in test_chars:
-                yield ChatRec(ctx, resp)
+        if len(self) > min_ctx:     # we need at least min_ctx + 1 utterances
+            for right in range(min_ctx, len(self) - 1):
+                left = max(0, right - max_ctx)
+                ctx = self.chat[left: right]
+                resp = self.chat[right + 1]
+                if not test_chars or resp.char in test_chars:
+                    yield ChatRec(ctx, resp)
 
 
 class RawDialogReader:
@@ -533,7 +535,8 @@ class DialogBatchReader:
 
     def __init__(self, reader: DialogReader, min_ctx: int = 2, max_ctx: int = 10,
                  max_utters: int = 10, max_dialogs: int = 20, sort_desc: bool = True,
-                 pad=True, model_chars: Optional[Set] = None, min_resp_len: int=-1):
+                 pad=True, model_chars: Optional[Set] = None, min_resp_len: int=-1,
+                 no_repeat: bool=False):
         assert 0 < min_ctx <= max_ctx
         assert 0 < max_utters <= max_dialogs
 
@@ -545,6 +548,9 @@ class DialogBatchReader:
         self.sort_desc = sort_desc
         self.pad = pad
         self.model_chars = model_chars
+        self.no_repeat = no_repeat
+        if self.no_repeat:
+            log.info("No repeat sub ctx enabled")
         if min_resp_len > 0:
             log.info(f"Ignoring responses shorter than {min_resp_len} from {reader.path}")
         self.min_resp_len = min_resp_len
@@ -563,7 +569,8 @@ class DialogBatchReader:
         for dialog in self.reader:
             for chat in dialog.as_mini_chats(min_ctx=self.min_ctx, max_ctx=self.max_ctx,
                                              model_chars=self.model_chars,
-                                             min_resp_len=self.min_resp_len):
+                                             min_resp_len=self.min_resp_len,
+                                             no_repeat=self.no_repeat):
                 utters.maybe_update(chat.context)  # this might exceed max_utters, but that's okay
                 utters.maybe_add(chat.response)
                 chats.append(chat)
