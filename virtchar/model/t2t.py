@@ -108,6 +108,7 @@ class Encoder(nn.Module):
 
     def __init__(self, layer: EncoderLayer, N: int):
         super(Encoder, self).__init__()
+        self.size = layer.size
         self.layers = clones(layer, N)
         self.norm = LayerNorm(layer.size)
 
@@ -286,6 +287,7 @@ class HieroTransformer(DialogModel):
         self.tgt_inp_embs: ComboEmbeddings = tgt_inp_embs
         self.generator = generator
         self._model_dim = generator.d_model
+        self.sent_repr_norm = LayerNorm(utter_encoder.size)
         # positional encoder for the chat sequence
         self.posit_enc = PositionalEncoding(self._model_dim, dropout=dropout)
 
@@ -355,6 +357,9 @@ class HieroTransformer(DialogModel):
         # Divide by the sqrt of length of sentences. Why? normalize the effect of unequal length
         # Google guys did it too: https://arxiv.org/pdf/1803.11175.pdf (I learned this from them)
         sent_reprs = sent_reprs.div(utter_lens.float().sqrt().unsqueeze(1))
+
+        # Layer Norm
+        sent_reprs = self.sent_repr_norm(sent_reprs)
 
         # :: level 2 :: Prepare
         # Now, we need to construct chat context from these
