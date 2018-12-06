@@ -188,7 +188,9 @@ class SublayerConnection(nn.Module):
 
 def attention(query, key, value, mask=None, dropout=None):
     "Compute 'Scaled Dot Product Attention'"
+    # query, key, value are [Batch x Heads x SeqLen x d_k]
     d_k = query.size(-1)
+    #  key : transpose(-2, -1) --> [Batch x Heads x d_k x SeqLen ]
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
     if mask is not None:
         scores = scores.masked_fill(mask == 0, -1e9)
@@ -214,12 +216,14 @@ class MultiHeadedAttention(nn.Module):
         "Implements Figure 2"
         if mask is not None:
             # Same mask applied to all h heads.
+            # [Batch x 1=heads x Time x SeqLen]  Time=1 for Source seq; Time=future pad for Target
             mask = mask.unsqueeze(1)
         nbatches = query.size(0)
 
         # 1) Do all the linear projections in batch from d_model => h x d_k
         query, key, value = [lin(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
                              for lin, x in zip(self.linears, (query, key, value))]
+        # [Batch x SeqLen x Heads x d_k] --> transpose(1,2) --> [Batch x Heads x SeqLen x d_k]
 
         # 2) Apply attention on all the projected vectors in batch.
         x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
