@@ -249,13 +249,12 @@ class Dialog:
         :return: an iterator of ChatRec
         """
         assert 0 < min_ctx <= max_ctx
-        if len(self) > min_ctx:     # we need at least min_ctx + 1 utterances
-            for right in range(min_ctx, len(self) - 1):
-                left = max(0, right - max_ctx)
-                ctx = self.chat[left: right]
-                resp = self.chat[right + 1]
-                if not test_chars or resp.char in test_chars:
-                    yield ChatRec(ctx, resp)
+        for right in range(min_ctx, len(self)):
+            left = max(0, right - max_ctx)
+            ctx = self.chat[left: right]        # right is not included
+            resp = self.chat[right]              # right is the response
+            if not test_chars or resp.char in test_chars:
+                yield ChatRec(ctx, resp)
 
 
 class RawDialogReader:
