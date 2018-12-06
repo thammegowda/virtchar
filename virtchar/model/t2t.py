@@ -36,12 +36,13 @@ class ComboEmbeddings(nn.Module):
     """
     Combined embeddings for characters (i.e. speakers) and words
     """
+
     def __init__(self, d_model, text_vocab, char_vocab, char_emb_size=None):
         super().__init__()
 
         self.text_emb = nn.Embedding(text_vocab, d_model)
         self.char_emb_size = char_emb_size
-        if char_emb_size > 0: # Zero or a negative value disables this
+        if char_emb_size > 0:  # Zero or a negative value disables this
             log.info(f"Character embeddings enabled: dim={char_emb_size}")
             self.char_emb = nn.Embedding(char_vocab, self.char_emb_size)
             self.merge = nn.Linear(self.char_emb_size + d_model, d_model)
@@ -417,26 +418,31 @@ class HieroTransformer(DialogModel):
         decoder = Decoder(DecoderLayer(hid_size, c(attn), c(attn), c(ff), dropout), n_layers)
 
         # char_emb = Embeddings(char_emb_size, char_vocab)
-        text_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab,
-                                                 char_emb_size=char_emb_size),
-                                 PositionalEncoding(hid_size, dropout))
+        src_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab,
+                                                char_emb_size=char_emb_size),
+                                PositionalEncoding(hid_size, dropout))
+        tgt_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab,
+                                                char_emb_size=char_emb_size),
+                                PositionalEncoding(hid_size, dropout))
         generator = Generator(hid_size, text_vocab)
 
         model = HieroTransformer(utter_encoder=utter_encoder,
                                  ctx_encoder=ctx_encoder,
                                  decoder=decoder,
-                                 src_inp_embs=text_emb,
-                                 tgt_inp_embs=c(text_emb),
+                                 src_inp_embs=src_emb,
+                                 tgt_inp_embs=tgt_emb,
                                  generator=generator,
                                  dropout=dropout)
 
         # Tied embeddings
         if tied_emb:
-            log.info("Tying embeddings : tgtout == tgtinp")
-            model.generator.proj.weight = model.tgt_inp_embs[0].text_emb.weight
             if tied_emb == 'three-way':
                 log.info("Tying embeddings : srcinp == tgtinp")
+                print(type(model.src_inp_embs[0].text_emb.weight),
+                      type(model.tgt_inp_embs[0].text_emb.weight))
                 model.src_inp_embs[0].text_emb.weight = model.tgt_inp_embs[0].text_emb.weight
+            log.info("Tying embeddings : tgtout == tgtinp")
+            model.generator.proj.weight = model.tgt_inp_embs[0].text_emb.weight
 
         # Initialize parameters with Glorot / fan_avg.
         for p in model.parameters():
