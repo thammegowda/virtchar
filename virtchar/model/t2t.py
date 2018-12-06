@@ -286,7 +286,7 @@ class HieroTransformer(DialogModel):
                  tgt_inp_embs: ComboEmbeddings,
                  generator: Generator,
                  dropout: float,
-                 sent_repr_mode:float = 'sum'):
+                 sent_repr_mode: str = 'cls'):
         super().__init__()
         self.utter_encoder = utter_encoder
         self.ctx_encoder = ctx_encoder
@@ -372,6 +372,9 @@ class HieroTransformer(DialogModel):
         utter_encoded = utter_encoded * utter_mask.unsqueeze(2).type_as(utter_encoded)
 
         if self.sent_repr_mode == 'sum':
+            log.warning("summing the vectors didn't help. Don't use this, don't do this")
+            # question and the reason still this block is here, is
+            # FIXME:  why this didn't work? What am I missing?
             # Sum element wise along the time dimension
             sent_reprs = utter_encoded.sum(dim=1)
             # Divide by the sqrt of length of sentences. Why? normalize the effect of unequal length
@@ -417,7 +420,7 @@ class HieroTransformer(DialogModel):
                    dropout=0.1,
                    char_emb_size=50,
                    tied_emb=None,
-                   sent_repr_mode='sum'):
+                   sent_repr_mode='cls'):
         "Helper: Construct a model from hyper parameters."
 
         # args for reconstruction of model
