@@ -441,10 +441,7 @@ class HieroTransformer(DialogModel):
         decoder = Decoder(DecoderLayer(hid_size, c(attn), c(attn), c(ff), dropout), n_layers)
 
         # char_emb = Embeddings(char_emb_size, char_vocab)
-        src_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab,
-                                                char_emb_size=char_emb_size),
-                                PositionalEncoding(hid_size, dropout))
-        tgt_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab,
+        combo_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab,
                                                 char_emb_size=char_emb_size),
                                 PositionalEncoding(hid_size, dropout))
         generator = Generator(hid_size, text_vocab)
@@ -452,19 +449,13 @@ class HieroTransformer(DialogModel):
         model = HieroTransformer(utter_encoder=utter_encoder,
                                  ctx_encoder=ctx_encoder,
                                  decoder=decoder,
-                                 src_inp_embs=src_emb,
-                                 tgt_inp_embs=tgt_emb,
+                                 src_inp_embs=combo_emb,
+                                 tgt_inp_embs=combo_emb,
                                  generator=generator,
                                  dropout=dropout,
                                  sent_repr_mode=sent_repr_mode)
-
         # Tied embeddings
         if tied_emb:
-            if tied_emb == 'three-way':
-                log.info("Tying embeddings : srcinp == tgtinp")
-                print(type(model.src_inp_embs[0].text_emb.weight),
-                      type(model.tgt_inp_embs[0].text_emb.weight))
-                model.src_inp_embs[0].text_emb.weight = model.tgt_inp_embs[0].text_emb.weight
             log.info("Tying embeddings : tgtout == tgtinp")
             model.generator.proj.weight = model.tgt_inp_embs[0].text_emb.weight
 
