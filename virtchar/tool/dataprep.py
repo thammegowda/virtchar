@@ -325,13 +325,13 @@ class DialogReader:
     This one works with processed data i.e. word ids
     """
 
-    def __init__(self, path: Path, shuffle_buffer_size=50000):
+    def __init__(self, path: Path, shuffle=True):
         """
         :param path: path to read TSV
         """
         assert path.exists()
         self.path = path
-        self.shuf_buf_size = shuffle_buffer_size
+        self.shuffle = shuffle
 
     @staticmethod
     def read_all(path: Path):
@@ -355,36 +355,16 @@ class DialogReader:
         log.info(f"Read {count} dialogs")
 
     @staticmethod
-    def buffered_shuffle(itr, buffer_size):
-        buffer = []
-        # A simple 3 stage algorithm for shuffling a stream using a fixed size buffer:
-        # 1. load initial buffer until full
-        # 2. shuffle, pop, yield and then append until the iterator becomes empty
-        # 3. shuffle, pop and yield until the buffer becomes empty
-        #  --> I don't guarantee uniform random shuffle
-
-        # Step: fill the buffer
-        item = object()
-        while len(buffer) < buffer_size and item:
-            item = next(itr, None)
-            if item:
-                buffer.append(item)
-        # Step: Advance: remove one then add one,
-        item = next(itr, None)
-        while item:
-            random.shuffle(buffer)
-            yield buffer.pop(0)
-            buffer.append(item)
-            item = next(itr, None)
-
-        # step: empty the buffer
-        while len(buffer) > 0:
-            random.shuffle(buffer)
-            yield buffer.pop(0)
+    def buffered_shuffle(itr):
+        buffer = list(itr)
+        random.shuffle(buffer)
+        return buffer
 
     def __iter__(self):
         dialogs = self.read_all(self.path)
-        dialogs = self.buffered_shuffle(dialogs, buffer_size=self.shuf_buf_size)
+        if self.shuffle:
+            log.info("Going to shuffle using a buffer. If this causes OOM, don't blame me!")
+            dialogs = self.buffered_shuffle(dialogs)
         yield from dialogs
 
 
