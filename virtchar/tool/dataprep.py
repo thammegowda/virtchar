@@ -331,6 +331,7 @@ class DialogReader:
         assert path.exists()
         self.path = path
         self.shuffle = shuffle
+        self._logged = False
 
     @staticmethod
     def read_all(path: Path):
@@ -362,7 +363,9 @@ class DialogReader:
     def __iter__(self):
         dialogs = self.read_all(self.path)
         if self.shuffle:
-            log.info("Going to shuffle using a buffer. If this causes OOM, don't blame me!")
+            if self._logged:
+                log.info("Going to shuffle using a buffer. If this causes OOM, don't blame me!")
+                self._logged = True
             dialogs = self.buffered_shuffle(dialogs)
         yield from dialogs
 
@@ -533,6 +536,7 @@ class DialogBatchReader:
         if min_resp_len > 0:
             log.info(f"Ignoring responses shorter than {min_resp_len} from {reader.path}")
         self.min_resp_len = min_resp_len
+        self._logged = False
 
     def __iter__(self):
         count = 0
@@ -564,7 +568,9 @@ class DialogBatchReader:
             yield DialogMiniBatchRaw.new(utters.to_list(), chats=chats, sort_desc=self.sort_desc,
                                          pad=self.pad)
             count += 1
-        log.info(f"Produced {count} dialog batches")
+        if not self._logged:
+            log.info(f"Produced {count} dialog batches")
+            self._logged = True
 
 
 def _test_batching_():
