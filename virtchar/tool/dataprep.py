@@ -16,11 +16,13 @@ PAD_TOK = '<pad>', 0
 UNK_TOK = '<unk>', 1
 BOS_TOK = '<s>', 2
 EOS_TOK = '</s>', 3
+CLS_TOK = '<cls>', 4
 
 BOS_TOK_IDX = BOS_TOK[1]
 EOS_TOK_IDX = EOS_TOK[1]
 PAD_TOK_IDX = PAD_TOK[1]
 UNK_TOK_IDX = UNK_TOK[1]
+CLS_TOK_IDX = CLS_TOK[1]
 
 RESERVED_TOKS = [PAD_TOK, UNK_TOK, BOS_TOK, EOS_TOK]
 
@@ -44,8 +46,11 @@ class Field(SentencePieceProcessor):
             path = str(path)
         assert self.load(path)
 
-    def encode_as_ids(self, text: str, add_bos=False, add_eos=False) -> List[int]:
+    def encode_as_ids(self, text: str, add_bos=False, add_eos=False, add_cls=False) -> List[int]:
+        assert not (add_bos and add_cls), 'Either BOS or CLS can be added, not both'
         ids = super(Field, self).encode_as_ids(text)
+        if add_cls and ids[0] != CLS_TOK[1]:
+            ids.insert(0, CLS_TOK[1])
         if add_bos and ids[0] != BOS_TOK[1]:
             ids.insert(0, BOS_TOK[1])
         if add_eos and ids[-1] != EOS_TOK[1]:
@@ -182,7 +187,7 @@ class ChatRec:
     context: List[Utterance]
     response: Utterance
 
-    def as_dialog_mini_batch(self):
+    def as_dialog_mini_batch(self, sort_dec=True):
         """
         Convert this ChatRec to DialogMiniBatch
         :return:
@@ -190,7 +195,8 @@ class ChatRec:
         chat_idx = ChatRecIdx(list(range(len(self.context))), len(self.context))
         utters = self.context + [self.response]
         raw_batch = DialogMiniBatchRaw(utters, [chat_idx])
-        raw_batch.sort_desc(add_eos=True)
+        if sort_dec:
+            raw_batch.sort_desc()
         return DialogMiniBatch(raw_batch)
 
 
@@ -266,7 +272,7 @@ class RawDialogReader:
     def __init__(self, inp: Union[str, Path, TextIO, Iterator[str]],
                  text_field: Field = None,
                  char_field: LookupField = None,
-                 max_seq_len: int = 100):
+                 max_seq_len: int = 100, add_eos=True):
         """
 
         :param inp: dialog seq file
@@ -283,6 +289,7 @@ class RawDialogReader:
         self.text_field = text_field
         self.char_field = char_field
         self.max_seq_len = max_seq_len
+        self.add_eos = add_eos
 
     def __iter__(self):
         count = 0
@@ -302,9 +309,11 @@ class RawDialogReader:
             if self.char_field:
                 char = self.char_field.encode_as_id(raw_char)
             if self.text_field:
-                seq = self.text_field.encode_as_ids(raw_text)
+                seq = self.text_field.encode_as_ids(raw_text, add_eos=True)
             else:
                 seq = raw_text.strip().split()
+                if self.add_eos and seq[-1] != EOS_TOK[0]:
+                    seq.append(EOS_TOK[0])
             seq = seq[:self.max_seq_len]
             utter = Utterance(char, seq, raw_text=raw_text, raw_char=raw_char, uid=uid)
             dialog.append(utter)
@@ -324,7 +333,7 @@ class DialogReader:
     This one works with processed data i.e. word ids
     """
 
-    def __init__(self, path: Path, shuffle=True):
+    def __init__(self, path: Path, shuffle=True, add_eos=True):
         """
         :param path: path to read TSV
         """
@@ -332,9 +341,10 @@ class DialogReader:
         self.path = path
         self.shuffle = shuffle
         self._mem = None
+        self.add_eos = add_eos
 
     @staticmethod
-    def read_all(path: Path):
+    def read_all(path: Path, add_eos):
         count = 0
         with IO.reader(path) as reader:
             dialog = Dialog()
@@ -343,6 +353,8 @@ class DialogReader:
                 if line:
                     char, seq = line.split("\t")[-2:]
                     char, seq = int(char), [int(x) for x in seq.strip().split()]
+                    if add_eos and seq[-1] != EOS_TOK_IDX:
+                        seq.append(EOS_TOK_IDX)
                     dialog.append(Utterance(char, seq))
                 else:
                     if len(dialog) > 0:
@@ -358,7 +370,7 @@ class DialogReader:
         if self.shuffle:
             if not self._mem:
                 log.info("Going to shuffle using a buffer. If this causes OOM, don't blame me!")
-                self._mem = list(self.read_all(self.path))
+                self._mem = list(self.read_all(self.path, add_eos=self.add_eos))
             random.shuffle(self._mem)
             dialogs = self._mem
         else:
@@ -375,7 +387,7 @@ class DialogMiniBatchRaw:
     def is_empty(self):
         return len(self.chats) == 0
 
-    def sort_desc(self, add_eos=True):
+    def sort_desc(self):
         """
         Sort descending order of sequence lengths.
         There is two levels of sorting involved.
@@ -383,11 +395,6 @@ class DialogMiniBatchRaw:
             level2: sort the utterances based on number of words
         :return:
         """
-
-        if add_eos:
-            for u in self.utters:
-                if u.text[-1] != EOS_TOK_IDX:
-                    u.text.append(EOS_TOK_IDX)
 
         # Step1: sort chats based on context length
         self.chats: List[ChatRecIdx] = sorted(self.chats, key=lambda x: len(x), reverse=True)
@@ -512,17 +519,17 @@ class OrderedSet(dict):
 class DialogBatchReader:
 
     def __init__(self, reader: DialogReader, min_ctx: int = 2, max_ctx: int = 10,
-                 max_utters: int = 10, max_dialogs: int = 20, sort_desc: bool = True,
+                 max_utters: int = 10, max_chats: int = 20, sort_desc: bool = True,
                  pad=True, model_chars: Optional[Set] = None, min_resp_len: int=-1,
                  no_repeat: bool=False):
         assert 0 < min_ctx <= max_ctx
-        assert 0 < max_utters <= max_dialogs
+        assert 0 < max_chats <= max_utters
 
         self.reader: Iterator[Dialog] = reader
         self.min_ctx = min_ctx
         self.max_ctx = max_ctx
         self.max_utters = max_utters  # Note: this is not guaranteed
-        self.max_dialogs = max_dialogs
+        self.max_chats = max_chats
         self.sort_desc = sort_desc
         self.pad = pad
         self.model_chars = model_chars
@@ -542,8 +549,8 @@ class DialogBatchReader:
         def utters_space():
             return self.max_utters - len(utters)
 
-        def dialog_space():
-            return self.max_dialogs - len(chats)
+        def chat_space():
+            return self.max_chats - len(chats)
 
         for dialog in self.reader:
             for chat in dialog.as_mini_chats(min_ctx=self.min_ctx, max_ctx=self.max_ctx,
@@ -553,7 +560,7 @@ class DialogBatchReader:
                 utters.maybe_update(chat.context)  # this might exceed max_utters, but that's okay
                 utters.maybe_add(chat.response)
                 chats.append(chat)
-                if utters_space() <= 0 or dialog_space() <= 0:
+                if utters_space() <= 0 or chat_space() <= 0:
                     batch = DialogMiniBatchRaw.new(utters.to_list(), chats=chats,
                                                    sort_desc=self.sort_desc, pad=self.pad)
                     yield batch
@@ -658,7 +665,7 @@ tensor([[ 3,  0,  3,  2,  1],
         Utterance(12, ['b20']),
     ])
     r: Iterator[DialogMiniBatchRaw] = DialogBatchReader(
-        reader=[d1, d2], min_ctx=2, max_ctx=4, max_utters=5, max_dialogs=5, sort_desc=True,
+        reader=[d1, d2], min_ctx=2, max_ctx=4, max_utters=5, max_chats=5, sort_desc=True,
         pad=False)
 
     for i, b in enumerate(r):
@@ -672,7 +679,7 @@ tensor([[ 3,  0,  3,  2,  1],
         Utterance(3, [30, 31, 32, 33, 34, 35])])
 
     r: Iterator[DialogMiniBatch] = DialogBatchReader(
-        reader=[d3], min_ctx=2, max_ctx=4, max_utters=5, max_dialogs=5, sort_desc=True,
+        reader=[d3], min_ctx=2, max_ctx=4, max_utters=5, max_chats=5, sort_desc=True,
         pad=True)
     for i, b in enumerate(r):
         print(f"===batch:{i}==")

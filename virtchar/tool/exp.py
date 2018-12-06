@@ -340,7 +340,7 @@ class DialogExperiment:
         name, args = optim_args
         self.config['optim'] = {'name': name, 'args': args}
 
-    def get_train_data(self, shuffle=False, fine_tune=False, loop_steps=0) \
+    def get_train_data(self, shuffle=False, fine_tune=False, loop_steps=0, sort_dec=True) \
             -> Iterator[DialogMiniBatch]:
         assert not shuffle, 'Not supported at the moment'
         inp_file = self.train_file
@@ -352,28 +352,29 @@ class DialogExperiment:
             inp_file = self.finetune_file
 
         reader = DialogReader(inp_file)
-
         train_data = DialogBatchReader(reader,
                                        min_ctx=self.min_ctx,
                                        max_ctx=self.max_ctx,
-                                       max_dialogs=self.max_utters,
+                                       max_chats=self.max_chats,
                                        max_utters=self.max_utters,
                                        model_chars=None,
                                        min_resp_len=self.min_resp_len,
-                                       no_repeat=self.no_repeat)
+                                       no_repeat=self.no_repeat,
+                                       sort_desc=sort_dec)
         return LoopingIterable(train_data, total=loop_steps) if loop_steps > 0 else train_data
 
     @functools.lru_cache(maxsize=2)
-    def get_val_data(self) -> Iterator[DialogMiniBatch]:
+    def get_val_data(self, sort_dec=True) -> Iterator[DialogMiniBatch]:
         reader = DialogReader(self.valid_file)
         reader = DialogBatchReader(reader,
                                    min_ctx=self.min_ctx,
                                    max_ctx=self.max_ctx,
-                                   max_dialogs=self.max_utters,
+                                   max_chats=self.max_chats,
                                    max_utters=self.max_utters,
                                    model_chars=None,
                                    min_resp_len=self.min_resp_len,
-                                   no_repeat=self.no_repeat)
+                                   no_repeat=self.no_repeat,
+                                   sort_desc=sort_dec)
         return list(reader)  # keep it in memory
 
     @property
@@ -389,8 +390,8 @@ class DialogExperiment:
         return self.config['trainer']['max_ctx']
 
     @property
-    def max_dialogs(self):
-        return self.config['trainer']['max_dialogs']
+    def max_chats(self):
+        return self.config['trainer']['max_chats']
 
     @property
     def max_utters(self):

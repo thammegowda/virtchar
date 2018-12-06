@@ -14,7 +14,9 @@ from virtchar import device, log, my_tensor as tensor, DialogExperiment
 from virtchar.model import DialogModel
 from virtchar.model.trainer import TrainerState, SteppedTrainer
 from virtchar.tool.dataprep import DialogMiniBatch
-from virtchar.tool.dataprep import PAD_TOK_IDX as PAD_IDX, BOS_TOK_IDX as BOS_IDX
+from virtchar.tool.dataprep import (PAD_TOK_IDX as PAD_IDX,
+                                    BOS_TOK_IDX as BOS_IDX,
+                                    CLS_TOK_IDX as CLS_IDX)
 
 
 def clones(module, N):
@@ -283,7 +285,8 @@ class HieroTransformer(DialogModel):
                  src_inp_embs: ComboEmbeddings,
                  tgt_inp_embs: ComboEmbeddings,
                  generator: Generator,
-                 dropout: float):
+                 dropout: float,
+                 sent_repr_mode:float = 'sum'):
         super().__init__()
         self.utter_encoder = utter_encoder
         self.ctx_encoder = ctx_encoder
@@ -292,6 +295,9 @@ class HieroTransformer(DialogModel):
         self.tgt_inp_embs: ComboEmbeddings = tgt_inp_embs
         self.generator = generator
         self._model_dim = generator.d_model
+        assert sent_repr_mode in ('sum', 'cls')
+        log.info(f"Sentence Representation mode :: {sent_repr_mode}")
+        self.sent_repr_mode = sent_repr_mode
         self.sent_repr_norm = LayerNorm(utter_encoder.size)
         # positional encoder for the chat sequence
         self.posit_enc = PositionalEncoding(self._model_dim, dropout=dropout)
@@ -339,6 +345,7 @@ class HieroTransformer(DialogModel):
                                  device=device, dtype=torch.long)
             tgt_seqs = torch.cat([bos_col, tgt_seqs], dim=1)
         dec_feats = self.decode(ctx_enc_outs, ctx_mask, tgt_seqs, batch.resp_chars)
+
         if add_bos:
             # slide left;; remove the last time step
             dec_feats = dec_feats[:, :-1]
@@ -346,6 +353,13 @@ class HieroTransformer(DialogModel):
         return dec_feats
 
     def hiero_encode(self, utter_seqs, utter_lens, chars, chat_ctx_idx):
+
+        n_utters = utter_seqs.shape[0]
+        if self.sent_repr_mode == 'cls':
+            utter_lens = utter_lens + 1
+            first_col = torch.full((n_utters, 1), fill_value=CLS_IDX, dtype=torch.long,
+                                   device=device)
+            utter_seqs = torch.cat([first_col, utter_seqs], dim=1)
 
         n_utters, max_len = utter_seqs.shape
         utter_mask = (utter_seqs != PAD_IDX)
@@ -357,12 +371,18 @@ class HieroTransformer(DialogModel):
         # Mask out padded time steps
         utter_encoded = utter_encoded * utter_mask.unsqueeze(2).type_as(utter_encoded)
 
-        # Sum element wise along the time dimension
-        sent_reprs = utter_encoded.sum(dim=1)
-        # Divide by the sqrt of length of sentences. Why? normalize the effect of unequal length
-        # Google guys did it too: https://arxiv.org/pdf/1803.11175.pdf (I learned this from them)
-        sent_reprs = sent_reprs.div(utter_lens.float().sqrt().unsqueeze(1))
-
+        if self.sent_repr_mode == 'sum':
+            # Sum element wise along the time dimension
+            sent_reprs = utter_encoded.sum(dim=1)
+            # Divide by the sqrt of length of sentences. Why? normalize the effect of unequal length
+            # Google guys did it too: https://arxiv.org/pdf/1803.11175.pdf (I learned from them)
+            sent_reprs = sent_reprs.div(utter_lens.float().sqrt().unsqueeze(1))
+        elif self.sent_repr_mode == 'cls':
+            # Get the repr of <cls> token (that we inserted earlier),
+            # google guys did it too in BERT paper
+            sent_reprs = utter_encoded[:, 0]
+        else:
+            raise Exception("This shouldn't be happening :-(")
         # Layer Norm
         sent_reprs = self.sent_repr_norm(sent_reprs)
 
@@ -371,6 +391,7 @@ class HieroTransformer(DialogModel):
         # Inserting 0s at the 0th row, so we can pick rows based on indices, where index=0 is pad
         padded_sent_repr = torch.cat(
             [torch.zeros(1, sent_reprs.shape[1], device=device), sent_reprs], dim=0)
+
 
         # index_select works with vector, so we flatten and then restore
         chat_input = torch.index_select(padded_sent_repr, 0, chat_ctx_idx.view(-1))
@@ -395,7 +416,8 @@ class HieroTransformer(DialogModel):
                    n_heads=8,
                    dropout=0.1,
                    char_emb_size=50,
-                   tied_emb=None):
+                   tied_emb=None,
+                   sent_repr_mode='sum'):
         "Helper: Construct a model from hyper parameters."
 
         # args for reconstruction of model
@@ -407,7 +429,8 @@ class HieroTransformer(DialogModel):
                 'n_heads': n_heads,
                 'dropout': dropout,
                 'tied_emb': tied_emb,
-                'char_emb_size': char_emb_size
+                'char_emb_size': char_emb_size,
+                'sent_repr_mode': sent_repr_mode
                 }
         c = copy.deepcopy
         attn = MultiHeadedAttention(n_heads, hid_size)
@@ -432,7 +455,8 @@ class HieroTransformer(DialogModel):
                                  src_inp_embs=src_emb,
                                  tgt_inp_embs=tgt_emb,
                                  generator=generator,
-                                 dropout=dropout)
+                                 dropout=dropout,
+                                 sent_repr_mode=sent_repr_mode)
 
         # Tied embeddings
         if tied_emb:
@@ -582,8 +606,8 @@ class HieroTransformerTrainer(SteppedTrainer):
             raise Exception(f'The model was already trained to {self.start_step} steps. '
                             f'Please increase the steps or clear the existing models')
         train_data = self.exp.get_train_data(loop_steps=steps - self.start_step,
-                                             fine_tune=fine_tune)
-        val_data = self.exp.get_val_data()
+                                             fine_tune=fine_tune, sort_dec=False)
+        val_data = self.exp.get_val_data(sort_dec=False)
 
         train_state = TrainerState(self.model, check_point=check_point)
         train_state.train_mode(True)
@@ -619,8 +643,7 @@ class HieroTransformerTrainer(SteppedTrainer):
                     train_state.train_mode(True)
 
 
-def __test_model__():
-    work_dir = '/Users/tg/work/phd/cs644/project/virtchar/tmp.work.transformer.simpl'
+def __test_model__(work_dir):
     exp = DialogExperiment(work_dir, read_only=True)
     text_vocab = len(exp.text_field)
     char_vocab = len(exp.char_field)
@@ -634,19 +657,20 @@ def __test_model__():
                                            hid_size=128,
                                            ff_size=256,
                                            n_heads=4,
-                                           char_emb_size=0)
+                                           char_emb_size=0,
+                                           sent_repr_mode='cls')
 
     trainer = HieroTransformerTrainer(exp=exp, model=model, warmup_steps=200)
     trainer.train(steps=steps, check_point=check_pt)
 
 
-def _test_samples_():
-    work_dir = '/Users/tg/work/phd/cs644/project/virtchar/runs/008-merged-tfm-nochar-1ctx'
+def _test_samples_(work_dir):
     exp = DialogExperiment(work_dir, read_only=True)
     trainer = HieroTransformerTrainer(exp=exp)
-    trainer.show_samples(beam_size=8, num_hyp=8, skip_top=1)
+    trainer.show_samples(beam_size=8, num_hyp=8, skip_top=0)
 
 
 if __name__ == '__main__':
-    #__test_model__()
-    _test_samples_()
+    exp_dir = '/Users/tg/work/phd/cs644/project/virtchar/runs/009-merged-tfm-nosubctx.sml'
+    __test_model__(exp_dir)
+    #_test_samples_(exp_dir)
