@@ -13,6 +13,7 @@ from virtchar.tool.dataprep import (
     RawRecord, DialogRecord, Field, LookupField, RawDialogReader, Dialog,
     DialogReader, DialogBatchReader, DialogMiniBatch, LoopingIterable)
 from virtchar.utils import IO
+from virtchar.tool.sampling_weight import cluster, sampling_weights
 
 
 class DialogExperiment:
@@ -144,12 +145,21 @@ class DialogExperiment:
                                           no_split_toks=no_split_toks)
 
         # create Piece IDs
-        for key, out_path in [('train_dialogs', self.train_file),
-                              ('valid_dialogs', self.valid_file)]:
+        for key, out_path, sample_wt in \
+                [('train_dialogs', self.train_file, True),
+                 ('valid_dialogs', self.valid_file, False)]:
             dialogs = RawDialogReader(args[key],
                                       text_field=self.text_field,
                                       char_field=self.char_field,
                                       max_seq_len=args['max_seq_len'])
+            if sample_wt:
+                dialogs = list(dialogs)  # if this causes OOM, re-read this file
+                # generate weights for sampling
+                weights = sampling_weights(cluster(dialogs).values())
+                for dlg in dialogs:
+                    for utter in dlg.chat:
+                        utter.weight = weights[utter.uid]
+
             self.write_dialogs(dialogs, out_path)
 
         if args.get("finetune_src") or args.get("finetune_tgt"):
@@ -176,6 +186,8 @@ class DialogExperiment:
                 for utter in dialog.chat:
                     if utter.uid:
                         outh.write(f'{utter.uid}\t')
+                    if utter.weight:
+                        outh.write(f'{utter.weight:g}\t')
                     text = " ".join(map(str, utter.text))
                     outh.write(f'{utter.char}\t{text}\n')
                 outh.write(dialog_sep)
@@ -194,6 +206,11 @@ class DialogExperiment:
                                   text_field=self.text_field,
                                   char_field=self.char_field,
                                   max_seq_len=args['max_seq_len'])
+        dialogs = list(dialogs)
+        weights = sampling_weights(cluster(dialogs).values())
+        for dlg in dialogs:
+            for utter in dlg.chat:
+                utter.weight = weights[utter.uid]
         self.write_dialogs(dialogs, self.finetune_file)
 
     def pre_process(self, args=None):
@@ -374,7 +391,8 @@ class DialogExperiment:
                                    model_chars=None,
                                    min_resp_len=self.min_resp_len,
                                    no_repeat=self.no_repeat,
-                                   sort_desc=sort_dec)
+                                   sort_desc=sort_dec,
+                                   down_sample=False)
         return list(reader)  # keep it in memory
 
     @property

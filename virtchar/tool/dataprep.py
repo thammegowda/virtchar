@@ -159,6 +159,7 @@ class Utterance:
     raw_text: str = None  # In case you like to keep the original text line for inspection
     raw_char: str = None  # in case you like to keep the original character name
     uid: Optional[str] = None  # In case you want to identify this by referencing to ext corpus
+    weight: Optional[float] = None   # weight such as sampling weight
 
     def __len__(self):
         return len(self.text)
@@ -214,7 +215,8 @@ class Dialog:
         return self.chat
 
     def as_mini_chats(self, min_ctx: int, max_ctx: int, model_chars: Optional[Set] = None,
-                      min_resp_len: int = -1, no_repeat=False) -> Iterator[ChatRec]:
+                      min_resp_len: int = -1, no_repeat=False,
+                      down_sample=True) -> Iterator[ChatRec]:
         """
 
         :param min_ctx: minimum context size for the response
@@ -224,6 +226,7 @@ class Dialog:
         :param min_resp_len: responses shorter than this will be skipped. value < 1 will disable
             this filter
         :param no_repeat: do not repeat chat with smaller ctx window
+        :param down_sample: sub sample most frequent responses
         :return:
         """
         assert 0 < min_ctx <= max_ctx
@@ -234,6 +237,12 @@ class Dialog:
             resp = self.chat[idx]
             if model_chars and resp.char not in model_chars:
                 continue
+            if down_sample and resp.weight < 0.999:
+                # if weight is 0.1 then only 10% of times this response should be chosen
+                #  and given to optimizer to update with its parameters
+                if resp.weight < random.uniform(0, 1):
+                    continue  # Ignore when satisfied, accept when failed. Am I doing it right?
+
             if min_resp_len > 0 and len(resp.text) < min_resp_len:
                 # ignore shorter responses
                 continue
@@ -290,8 +299,9 @@ class RawDialogReader:
         self.char_field = char_field
         self.max_seq_len = max_seq_len
         self.add_eos = add_eos
+        self.num_cols = 0
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Dialog]:
         count = 0
         dialog = Dialog()
         for line in self.reader:
@@ -303,6 +313,10 @@ class RawDialogReader:
                     dialog = Dialog()
                 continue
             parts = line.split("\t")
+            if len(parts) < self.num_cols:
+                log.error(f"Skipping the line: {line}")
+                continue
+            self.num_cols = max(len(parts), self.num_cols)
             raw_char, raw_text = parts[-2:]
             uid = parts[0] if len(parts) > 2 else None
             char = raw_char = raw_char.strip()
@@ -351,11 +365,14 @@ class DialogReader:
             for line in reader:
                 line = line.strip()
                 if line:
-                    char, seq = line.split("\t")[-2:]
+                    parts = line.split("\t")
+                    char, seq = parts[-2:]  # the last two are mandatory
+                    uid = parts[0] if len(parts) > 2 else None
+                    weight = float(parts[1]) if len(parts) > 3 else None
                     char, seq = int(char), [int(x) for x in seq.strip().split()]
                     if add_eos and seq[-1] != EOS_TOK_IDX:
                         seq.append(EOS_TOK_IDX)
-                    dialog.append(Utterance(char, seq))
+                    dialog.append(Utterance(char, seq, uid=uid, weight=weight))
                 else:
                     if len(dialog) > 0:
                         yield dialog
@@ -374,7 +391,7 @@ class DialogReader:
             random.shuffle(self._mem)
             dialogs = self._mem
         else:
-            dialogs = self.read_all(self.path)
+            dialogs = self.read_all(self.path, add_eos=self.add_eos)
         yield from dialogs
 
 
@@ -521,7 +538,7 @@ class DialogBatchReader:
     def __init__(self, reader: DialogReader, min_ctx: int = 2, max_ctx: int = 10,
                  max_utters: int = 10, max_chats: int = 20, sort_desc: bool = True,
                  pad=True, model_chars: Optional[Set] = None, min_resp_len: int=-1,
-                 no_repeat: bool=False):
+                 no_repeat: bool=False, down_sample: bool=True):
         assert 0 < min_ctx <= max_ctx
         assert 0 < max_chats <= max_utters
 
@@ -540,6 +557,9 @@ class DialogBatchReader:
             log.info(f"Ignoring responses shorter than {min_resp_len} from {reader.path}")
         self.min_resp_len = min_resp_len
         self.last_count = -1
+        self.down_sample = down_sample
+        if self.down_sample:
+            log.info("Sub sampling enabled. This will down sample most frequent responses")
 
     def __iter__(self):
         count = 0
@@ -556,7 +576,8 @@ class DialogBatchReader:
             for chat in dialog.as_mini_chats(min_ctx=self.min_ctx, max_ctx=self.max_ctx,
                                              model_chars=self.model_chars,
                                              min_resp_len=self.min_resp_len,
-                                             no_repeat=self.no_repeat):
+                                             no_repeat=self.no_repeat,
+                                             down_sample=self.down_sample):
                 utters.maybe_update(chat.context)  # this might exceed max_utters, but that's okay
                 utters.maybe_add(chat.response)
                 chats.append(chat)
