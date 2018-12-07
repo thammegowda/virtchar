@@ -298,7 +298,9 @@ class HieroTransformer(DialogModel):
         assert sent_repr_mode in ('sum', 'cls')
         log.info(f"Sentence Representation mode :: {sent_repr_mode}")
         self.sent_repr_mode = sent_repr_mode
-        self.sent_repr_norm = LayerNorm(utter_encoder.size)
+        if sent_repr_mode == 'sum':
+            log.warning("warning: summing the vectors didn't help in previous runs")
+            self.sent_repr_conn = SublayerConnection(self._model_dim, dropout)
         # positional encoder for the chat sequence
         self.posit_enc = PositionalEncoding(self._model_dim, dropout=dropout)
 
@@ -372,22 +374,26 @@ class HieroTransformer(DialogModel):
         utter_encoded = utter_encoded * utter_mask.unsqueeze(2).type_as(utter_encoded)
 
         if self.sent_repr_mode == 'sum':
-            log.warning("summing the vectors didn't help. Don't use this, don't do this")
             # question and the reason still this block is here, is
             # FIXME:  why this didn't work? What am I missing?
+
             # Sum element wise along the time dimension
             sent_reprs = utter_encoded.sum(dim=1)
             # Divide by the sqrt of length of sentences. Why? normalize the effect of unequal length
             # Google guys did it too: https://arxiv.org/pdf/1803.11175.pdf (I learned from them)
             sent_reprs = sent_reprs.div(utter_lens.float().sqrt().unsqueeze(1))
+
+            # Layer Norm
+            sent_reprs = self.sent_repr_conn(sent_reprs, lambda x: x)
+
         elif self.sent_repr_mode == 'cls':
             # Get the repr of <cls> token (that we inserted earlier),
             # google guys did it too in BERT paper
             sent_reprs = utter_encoded[:, 0]
+            # token is already normalized by the last layer of encoder
         else:
             raise Exception("This shouldn't be happening :-(")
-        # Layer Norm
-        sent_reprs = self.sent_repr_norm(sent_reprs)
+
 
         # :: level 2 :: Prepare
         # Now, we need to construct chat context from these
@@ -672,4 +678,4 @@ def _test_samples_(work_dir):
 if __name__ == '__main__':
     exp_dir = '/Users/tg/work/phd/cs644/project/virtchar/runs/009-merged-tfm-nosubctx.sml'
     __test_model__(exp_dir)
-    #_test_samples_(exp_dir)
+    # _test_samples_(exp_dir)

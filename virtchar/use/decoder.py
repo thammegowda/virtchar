@@ -116,7 +116,7 @@ class Decoder:
 
     @staticmethod
     def _checkpt_to_model_state(checkpt_path: str):
-        state = torch.load(checkpt_path)
+        state = torch.load(checkpt_path, map_location=device)
         if 'model_state' in state:
             state = state['model_state']
         return state
@@ -372,17 +372,22 @@ class Decoder:
     def decode_interactive(self, **args):
         import sys
         import readline
-        helps = [(':quit', 'Exit'),
-                 (':help', 'Print this help message'),
+        helps = [(':quit OR :q', 'Exit'),
+                 (':help OR :h', 'Print this help message'),
                  (':beam_size <n>', 'Set beam size to n'),
                  (':num_hyp <k>', 'Print top k hypotheses'),
-                 (':debug', 'Enable debug mode'),
-                 (':-debug', 'Disable debug mode'),
+                 (':clear OR :c', 'clear the context'),
+                 (':debug', 'Flip debug mode. ON->OFF; OFF->ON'),
                  (':models', 'show all available models of this experiment'),
                  (':model <number>', 'reload shell with the model chosen by <number>')
                  ]
-        if self.exp.model_type == 'binmt':
-            helps.append((':path <path>', 'BiNMT modules: {E1D1, E2D2, E1D2E2D1, E2D2E1D2}'))
+
+        args['min_ctx'] = args.get('min_ctx', self.exp.min_ctx)
+        args['max_ctx'] = args.get('max_ctx', self.exp.max_ctx)
+        has_src_chars, has_tgt_chars = self.model.has_char_embs
+        assert has_src_chars == has_tgt_chars, 'both on or both off' # only this is supported
+        has_chars = has_src_chars
+        context = []
 
         def print_cmds():
             for cmd, msg in helps:
@@ -391,11 +396,10 @@ class Decoder:
         print("Launching Interactive shell...")
         print_cmds()
         print_state = True
+
         while True:
             if print_state:
                 state = '  '.join(f'{k}={v}' for k, v in args.items())
-                if self.exp.model_type == 'binmt':
-                    state += f'  path={self.gen_args.get("path")}'
                 state += f'  debug={debug_mode}'
                 print('\t|' + state)
             print_state = False
@@ -404,10 +408,12 @@ class Decoder:
             if not line:
                 continue
             try:
-                if line == ':quit':
+                if line in (':quit', ':q'):
                     break
-                elif line == ':help':
+                elif line in (':help', ':h'):
                     print_cmds()
+                elif line in (':clear', ':c'):
+                    context.clear()
                 elif line.startswith(":beam_size "):
                     args['beam_size'] = int(line.replace(':beam_size', '').strip())
                     print_state = True
@@ -415,11 +421,7 @@ class Decoder:
                     args['num_hyp'] = int(line.replace(':num_hyp', '').strip())
                     print_state = True
                 elif line.startswith(":debug"):
-                    self.debug = True
-                    args['debug'] = True
-                    print_state = True
-                elif line.startswith(":-debug"):
-                    self.debug = False
+                    args['debug'] = self.debug = not self.debug
                     print_state = True
                 elif line.startswith(":path"):
                     self.gen_args['path'] = line.replace(':path', '').strip()
@@ -440,6 +442,16 @@ class Decoder:
                         print(f"\t Switching to models {mod_paths}")
                         raise ReloadEvent(mod_paths, state=args)
                 else:
+                    line = line.strip()
+                    if has_chars:
+                        assert ':' in line
+                        parts = line.split(':')
+                        if len(parts) == 1:
+                            # generate
+                        else:
+                            char_name = parts[0]
+                            utter = ':'.join(parts[1:])
+                            context.append((char_name, utter))
                     start = time.time()
                     res = self.decode_sentence(line, **args)
                     print(f'\t|took={1000 * (time.time()-start):.3f}ms')
