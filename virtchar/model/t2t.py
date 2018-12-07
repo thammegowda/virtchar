@@ -3,7 +3,7 @@
 import copy
 import math
 import time
-from typing import Callable, Optional, Iterator, Mapping
+from typing import Callable, Optional, Iterator, Mapping, Tuple
 
 import torch
 import torch.nn as nn
@@ -395,7 +395,6 @@ class HieroTransformer(DialogModel):
         padded_sent_repr = torch.cat(
             [torch.zeros(1, sent_reprs.shape[1], device=device), sent_reprs], dim=0)
 
-
         # index_select works with vector, so we flatten and then restore
         chat_input = torch.index_select(padded_sent_repr, 0, chat_ctx_idx.view(-1))
         chat_input = chat_input.view(*chat_ctx_idx.shape, -1)
@@ -413,7 +412,9 @@ class HieroTransformer(DialogModel):
     @staticmethod
     def make_model(text_vocab,
                    char_vocab,
-                   n_layers=6,
+                   dec_layers=3,
+                   utter_layers=3,
+                   ctx_layers=3,
                    hid_size=512,
                    ff_size=2048,
                    n_heads=8,
@@ -426,7 +427,9 @@ class HieroTransformer(DialogModel):
         # args for reconstruction of model
         args = {'text_vocab': text_vocab,
                 'char_vocab': char_vocab,
-                'n_layers': n_layers,
+                'dec_layers': dec_layers,
+                'utter_layers': utter_layers,
+                'ctx_layers': ctx_layers,
                 'hid_size': hid_size,
                 'ff_size': ff_size,
                 'n_heads': n_heads,
@@ -439,14 +442,14 @@ class HieroTransformer(DialogModel):
         attn = MultiHeadedAttention(n_heads, hid_size)
 
         ff = PositionwiseFeedForward(hid_size, ff_size, dropout)
-        utter_encoder = Encoder(EncoderLayer(hid_size, c(attn), c(ff), dropout), n_layers)
-        ctx_encoder = Encoder(EncoderLayer(hid_size, c(attn), c(ff), dropout), n_layers)
-        decoder = Decoder(DecoderLayer(hid_size, c(attn), c(attn), c(ff), dropout), n_layers)
+        utter_encoder = Encoder(EncoderLayer(hid_size, c(attn), c(ff), dropout), utter_layers)
+        ctx_encoder = Encoder(EncoderLayer(hid_size, c(attn), c(ff), dropout), ctx_layers)
+        decoder = Decoder(DecoderLayer(hid_size, c(attn), c(attn), c(ff), dropout), dec_layers)
 
         # char_emb = Embeddings(char_emb_size, char_vocab)
         combo_emb = nn.Sequential(ComboEmbeddings(hid_size, text_vocab, char_vocab=char_vocab,
-                                                char_emb_size=char_emb_size),
-                                PositionalEncoding(hid_size, dropout))
+                                                  char_emb_size=char_emb_size),
+                                  PositionalEncoding(hid_size, dropout))
         generator = Generator(hid_size, text_vocab)
 
         model = HieroTransformer(utter_encoder=utter_encoder,
@@ -647,7 +650,9 @@ def __test_model__(work_dir):
 
     model, _ = HieroTransformer.make_model(text_vocab,
                                            char_vocab,
-                                           n_layers=4,
+                                           utter_layers=4,
+                                           ctx_layers=4,
+                                           dec_layers=4,
                                            hid_size=128,
                                            ff_size=256,
                                            n_heads=4,
