@@ -37,8 +37,8 @@ Add the root directory of this repository to PYTHONPATH by `export PYTHONPATH=<p
 
 The crucial part is the config. You have to Learn by examples 🙃
 See that there are two examples in [example-confs](../example-confs) directory:
-1. [hiero-transformer-charemb.yml](example-confs/hiero-transformer-charemb.yml) -- the one for hierarchical transformer
-2. [rnn.conf.yml](example-confs/rnn.conf.yml) -- the one for hierarchical RNN (edit rnn_type=GRU or LSTM)
+1. [hiero-transformer-charemb.yml](../example-confs/hiero-transformer-charemb.yml) -- the one for hierarchical transformer
+2. [rnn.conf.yml](../example-confs/rnn.conf.yml) -- the one for hierarchical RNN (edit rnn_type=GRU or LSTM)
 
 
 ## Data format:
@@ -58,7 +58,7 @@ here is an example:
 An empty line separates two dialogs.  Each dialog has many utterances.
 Each utterance has  three fields: Id, SpeakerName, Text
 
-see [docs/dataprep.md](docs/dataprep.md) for tools related to data prep
+see [dataprep.md](dataprep.md) for tools related to data prep
 
 
 ## Step by Step Guide
