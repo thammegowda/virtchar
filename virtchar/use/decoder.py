@@ -11,7 +11,7 @@ from virtchar import DialogExperiment
 from virtchar import log, device, my_tensor as tensor, debug_mode
 from virtchar.model.rnn import HRED
 from virtchar.tool.dataprep import PAD_TOK, BOS_TOK, EOS_TOK, \
-    RawDialogReader, ChatRec, DialogMiniBatch, Dialog
+    RawDialogReader, ChatRec, DialogMiniBatch, Dialog, Utterance
 from virtchar.model.t2t import HieroTransformer
 
 Hypothesis = Tuple[float, List[int]]
@@ -378,6 +378,8 @@ class Decoder:
                  (':num_hyp <k>', 'Print top k hypotheses'),
                  (':clear OR :c', 'clear the context'),
                  (':debug', 'Flip debug mode. ON->OFF; OFF->ON'),
+                 (':args', 'Print args'),
+                 (':c or :clear', 'Clear context'),
                  (':models', 'show all available models of this experiment'),
                  (':model <number>', 'reload shell with the model chosen by <number>')
                  ]
@@ -386,6 +388,7 @@ class Decoder:
         args['max_ctx'] = args.get('max_ctx', self.exp.max_ctx)
         has_src_chars, has_tgt_chars = self.model.has_char_embs
         assert has_src_chars == has_tgt_chars, 'both on or both off' # only this is supported
+
         has_chars = has_src_chars
         context = []
 
@@ -393,20 +396,21 @@ class Decoder:
             for cmd, msg in helps:
                 print(f"\t{cmd:15}\t-\t{msg}")
 
+        def print_feedback(msg):
+            print('\t|' + msg)
+
         print("Launching Interactive shell...")
         print_cmds()
         print_state = True
-
+        tgt_char_name = None
         while True:
             if print_state:
-                state = '  '.join(f'{k}={v}' for k, v in args.items())
-                state += f'  debug={debug_mode}'
-                print('\t|' + state)
-            print_state = False
+                print_feedback('  '.join(f'{k}={v}' for k, v in args.items()))
+                print_state = False
+
+
             line = input('Input: ')
             line = line.strip()
-            if not line:
-                continue
             try:
                 if line in (':quit', ':q'):
                     break
@@ -414,6 +418,8 @@ class Decoder:
                     print_cmds()
                 elif line in (':clear', ':c'):
                     context.clear()
+
+                    tgt_char_name = None
                 elif line.startswith(":beam_size "):
                     args['beam_size'] = int(line.replace(':beam_size', '').strip())
                     print_state = True
@@ -422,6 +428,7 @@ class Decoder:
                     print_state = True
                 elif line.startswith(":debug"):
                     args['debug'] = self.debug = not self.debug
+
                     print_state = True
                 elif line.startswith(":path"):
                     self.gen_args['path'] = line.replace(':path', '').strip()
@@ -443,20 +450,63 @@ class Decoder:
                         raise ReloadEvent(mod_paths, state=args)
                 else:
                     line = line.strip()
-                    if has_chars:
-                        assert ':' in line
-                        parts = line.split(':')
-                        if len(parts) == 1:
-                            # generate
+                    generate = False
+                    if not line:
+                        # empty line --> try to generate
+                        if len(context) < args['min_ctx']:
+                            print_feedback(f"At least {args['min_ctx']} should be in context."
+                                           f" Currently you've {len(context)}")
+                        elif has_chars and not tgt_char_name:
+                            print_feedback(f"Target character name required. For example type:")
+                            print_feedback(f"<char_name>:")
                         else:
-                            char_name = parts[0]
-                            utter = ':'.join(parts[1:])
-                            context.append((char_name, utter))
-                    start = time.time()
-                    res = self.decode_sentence(line, **args)
-                    print(f'\t|took={1000 * (time.time()-start):.3f}ms')
-                    for score, hyp in res:
-                        print(f'  {score:.4f}\t{hyp}')
+                            generate = True
+                    else:
+                        print_update_msg = True
+                        if not has_chars:
+                            context.append((PAD_TOK[0], line))
+                        else:
+                            assert ':' in line
+                            parts = line.split(':')
+                            if len(parts) == 1:
+                                tgt_char_name = parts[0]
+                                print_feedback(f"Character name changed to {tgt_char_name}")
+                                print_update_msg = False
+                            else:
+                                assert len(parts) > 1, 'Expected: <char_name>: <text here>'
+                                char_name = parts[0]
+                                utter = ':'.join(parts[1:])
+                                context.append((char_name, utter))
+                        if print_update_msg:
+                            print_feedback(f"Added to context, size={len(context)}")
+                            if len(context) >= args['min_ctx']:
+                                print_feedback(f"Hit an empty line to generate")
+
+                    # when its time to generate
+                    if generate:
+                        start = time.time()
+                        context_utters = [Utterance(
+                            self.char_vocab.encode_as_id(char_name),
+                            self.text_vocab.encode_as_ids(text, add_eos=True),
+                            raw_text=text, raw_char=char_name)
+                            for char_name, text in context]
+                        placeholder_response = Utterance(self.char_vocab.encode_as_id(tgt_char_name)
+                                                         if tgt_char_name else PAD_TOK[1],
+                                                         text=[EOS_TOK[1]], raw_text='',
+                                                         raw_char=tgt_char_name)
+                        rec = ChatRec(context_utters, response=placeholder_response)
+                        batch = rec.as_dialog_mini_batch(sort_dec=False)
+
+                        print("Context:")
+                        for cn, txt in context:
+                            print(f'<< {cn if cn != PAD_TOK[0] else ""} : {txt}')
+                        print("Response:")
+                        result = self.generate_chat(batch, **args)
+                        pref = f"{tgt_char_name}:" if has_chars and tgt_char_name else ''
+                        for score, hyp in result:
+                            print(f' >> {pref} {hyp}\t{score:.4f}')
+                        print_feedback(f'took={1000 * (time.time()-start):.3f}ms')
+                        context.append((tgt_char_name if tgt_char_name else PAD_TOK[0], result[0][1]))
             except ReloadEvent as re:
                 raise re  # send it to caller
             except EOFError as e1:
@@ -471,10 +521,9 @@ class Decoder:
         for i, dialog in enumerate(dialogs):
             chats: Iterator[ChatRec] = dialog.as_test_chats(min_ctx=min_ctx, max_ctx=max_ctx,
                                                             test_chars=test_chars)
-            batches: Iterator[Tuple[ChatRec, DialogMiniBatch]] = \
-                [(c, c.as_dialog_mini_batch()) for c in chats]
-            # One chat in batch. Should/can be improved later
-            for j, (chat, batch) in enumerate(batches):
+            for j, chat in enumerate(chats):
+                # One chat in batch. Should/can be improved later
+                batch = chat.as_dialog_mini_batch()
                 log.info(f"dialog: {i}: chat: {j} :: \n"
                          f"MSG: {chat.context[-1].raw_char}: {chat.context[-1].raw_text}\n"
                          f"RSP: {chat.response.raw_char}: {chat.response.raw_text}")

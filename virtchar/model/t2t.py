@@ -304,6 +304,13 @@ class HieroTransformer(DialogModel):
         # positional encoder for the chat sequence
         self.posit_enc = PositionalEncoding(self._model_dim, dropout=dropout)
 
+    def contains_char_embs(self):
+        """
+        Flags to indicate if source and target was trained with character embeddings
+        :return: (src_has_chars, tgt_has_chars)
+        """
+        return self.src_inp_embs[0].char_emb is not None, self.src_inp_embs[0].char_emb is not None
+
     @property
     def model_dim(self):
         return self._model_dim
