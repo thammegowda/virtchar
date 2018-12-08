@@ -10,7 +10,7 @@ from virtchar.utils import log_tensor_sizes, Optims
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(prog="rtg.train", description="Train NMT model",
+    parser = argparse.ArgumentParser(prog="virtchar.train", description="Train Dialog model",
                                      formatter_class=ArgFormatter)
     parser.add_argument("work_dir", help="Working directory", type=str)
     parser.add_argument("-rs", "--seed", help="Seed for random number generator. Set it to zero "

@@ -7,7 +7,7 @@ from virtchar import DialogExperiment
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(prog="rtg.prep", description="prepare NMT experiment",
+    parser = argparse.ArgumentParser(prog="virtchar.prep", description="prepare Dialog experiment",
                                      formatter_class=ArgFormatter)
     parser.add_argument("work_dir", help="Working directory", type=str)
     parser.add_argument("conf_file", help="Config File", type=str)

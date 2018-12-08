@@ -24,6 +24,7 @@ trainer:
   max_ctx: 10
   max_utters: 20
   min_ctx: 2
+  no_repeat: true
 prep:
   finetune_dialogs: data/friends/friends.train.tok.tsv
   max_seq_len: 50
