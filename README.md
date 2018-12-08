@@ -5,8 +5,8 @@ This repository has code to create chat bots by training them on TV transcripts.
 See `requirements.txt` for the required libraries and versions.
 
 There are two kinds of models:
-1. Retrieval based models: See docs/retrieval-bot.md
-2. Generator models: See docs/neural-generator-bot.md
+1. Retrieval based models: See [docs/retrieval-bot.md](docs/retrieval-bot.md)
+2. Generator models: See [docs/neural-generator-bot.md](docs/neural-generator-bot.md)
 
 
 A Retrieval bot uses [InferSent](https://github.com/facebookresearch/InferSent) model to
@@ -41,7 +41,7 @@ For now, this project uses a simple technique of down sampling the utterances(it
 
 ## Questions? Want to help/collaborate?
 - Short enquiries : [Sent them to me](https://twitter.com/thammegowda)
-- Long discussions: Create an issue or pull request on this repo
+- Long discussions and bugs: Create an issue or pull request on this repo
 
 
 
