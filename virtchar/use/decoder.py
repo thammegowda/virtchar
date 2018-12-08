@@ -468,19 +468,21 @@ class Decoder:
                         else:
                             assert ':' in line
                             parts = line.split(':')
-                            if len(parts) == 1:
+                            if not parts[1]: # empty text
                                 tgt_char_name = parts[0]
                                 print_feedback(f"Character name changed to {tgt_char_name}")
-                                print_update_msg = False
+                                generate = len(context) >= args['min_ctx']
+                                print_update_msg = not generate
                             else:
                                 assert len(parts) > 1, 'Expected: <char_name>: <text here>'
                                 char_name = parts[0]
                                 utter = ':'.join(parts[1:])
                                 context.append((char_name, utter))
                         if print_update_msg:
-                            print_feedback(f"Added to context, size={len(context)}")
+                            msg = f"Added to context, size={len(context)}."
                             if len(context) >= args['min_ctx']:
-                                print_feedback(f"Hit an empty line to generate")
+                                msg += f" Hit an empty line to generate"
+                            print_feedback(msg)
 
                     # when its time to generate
                     if generate:
