@@ -8,7 +8,7 @@ Here we have Hierarchical Transformer and Hierarchical RNN model.
 ## For Operator
 - Experiment : An experiment is a top level entity, it includes model, trainer, optimizer,
 dataset, config etc
-- Config : An yaml file where you control the experiment. This is the only file you need to torch
+- Config : An yaml file where you control the experiment. This is the only file you need to touch.
 
 ## Inside the code
 - Dialog  : A dialog is a sequence of Utterances naturally occurring somewhere  (like a TV show).
@@ -36,9 +36,9 @@ Add the root directory of this repository to PYTHONPATH by `export PYTHONPATH=<p
 ## Config
 
 The crucial part is the config. You have to Learn by examples 🙃
-See that there are two examples in `example-confs` directory:
-1. example-confs/hiero-transformer-charmemb.yml -- the one for hierarchical transformer
-2. example-confs/rnn.conf.yml -- the one for hierarchical RNN (edit rnn_type=GRU or LSTM)
+See that there are two examples in [example-confs](../example-confs) directory:
+1. [hiero-transformer-charemb.yml](example-confs/hiero-transformer-charemb.yml) -- the one for hierarchical transformer
+2. [rnn.conf.yml]example-confs/rnn.conf.yml) -- the one for hierarchical RNN (edit rnn_type=GRU or LSTM)
 
 
 ## Data format:
@@ -58,7 +58,7 @@ here is an example:
 An empty line separates two dialogs.  Each dialog has many utterances.
 Each utterance has  three fields: Id, SpeakerName, Text
 
-see `docs/dataprep.md` for tools related to data prep
+see [docs/dataprep.md](docs/dataprep.md) for tools related to data prep
 
 
 ## Step by Step Guide
