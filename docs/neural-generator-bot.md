@@ -26,7 +26,7 @@ as fitting them into memory without ever crashing OOM.
 
 * `python -m virtchar.prep` - for preparing an experiment
 * `python -m virtchar.train` - for training a model
-* `python -m virtchar.decode -it -sc ` - for decoding
+* `python -m virtchar.decode -it -sc ` - for an interactive shell.
 
 You should be using them in the same order : prepare -> train -> decode
 
@@ -38,7 +38,7 @@ Add the root directory of this repository to PYTHONPATH by `export PYTHONPATH=<p
 The crucial part is the config. You have to Learn by examples 🙃
 See that there are two examples in [example-confs](../example-confs) directory:
 1. [hiero-transformer-charemb.yml](example-confs/hiero-transformer-charemb.yml) -- the one for hierarchical transformer
-2. [rnn.conf.yml]example-confs/rnn.conf.yml) -- the one for hierarchical RNN (edit rnn_type=GRU or LSTM)
+2. [rnn.conf.yml](example-confs/rnn.conf.yml) -- the one for hierarchical RNN (edit rnn_type=GRU or LSTM)
 
 
 ## Data format:
