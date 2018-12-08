@@ -331,6 +331,10 @@ class HRED(DialogModel):
     def model_dim(self):
         return self._model_dim
 
+    @property
+    def has_char_embs(self) -> Tuple[bool, bool]:
+        raise NotImplementedError()
+
     def hiero_encode(self, utters, utter_lens, chars, chat_ctx_idx, chat_lens):
         # :: level 1
         sent_outs, sent_reprs = self.utter_enc(utters, utter_lens, chars=chars, hidden=None)

@@ -399,6 +399,7 @@ class DialogReader:
 class DialogMiniBatchRaw:
     utters: List[Utterance] = field(default_factory=list)
     chats: List[ChatRecIdx] = field(default_factory=list)
+    has_ref: bool = True
 
     @property
     def is_empty(self):
@@ -427,6 +428,7 @@ class DialogMiniBatchRaw:
         self.utters: List[Utterance] = [uttr for _, (_, uttr) in new_n_old_idx_uttrs]
         for chat in self.chats:
             chat.context = [old_to_new_idx[old_idx] for old_idx in chat.context]
+            # response will be missing for test records
             chat.resp = old_to_new_idx[chat.resp]
 
     @staticmethod
@@ -480,8 +482,8 @@ class DialogMiniBatch:
         for i, chat in enumerate(batch.chats):
             self.chat_ctx_idx[i, :len(chat)] = tensor(chat.context, dtype=torch.int)
         self.chat_ctx_idx += 1  # zero is padding
+        self.has_ref = batch.has_ref
         self.chat_resp_idx = tensor([c.resp for c in batch.chats], dtype=torch.long)
-
         # task: prepare response sequence
         self.resp_seqs = torch.index_select(self.utters, 0, self.chat_resp_idx)
         self.resp_chars = torch.index_select(self.chars, 0, self.chat_resp_idx)
@@ -498,12 +500,13 @@ class DialogMiniBatch:
         bb.n_chats = self.n_chats * beam_size
         bb.chat_ctx_idx = self.chat_ctx_idx.repeat(1, beam_size).view(bb.n_chats, -1)
         bb.chat_lens = self.chat_lens.unsqueeze(1).repeat(1, beam_size).view(bb.n_chats)
-        bb.chat_resp_idx = self.chat_resp_idx.unsqueeze(1).repeat(1, beam_size).view(bb.n_chats)
         bb.resp_chars = self.resp_chars.repeat(1, beam_size).view(bb.n_chats)
-        if self.resp_seqs is not None:
+
+        if bb.has_ref:
+            bb.chat_resp_idx = self.chat_resp_idx.unsqueeze(1).repeat(1, beam_size).view(bb.n_chats)
             bb.resp_seqs = self.resp_seqs.repeat(1, beam_size).view(bb.n_chats, -1)
             bb.resp_lens = self.resp_lens.unsqueeze(1).repeat(1, beam_size).view(bb.n_chats)
-        bb.tot_resp_toks = bb.resp_lens.sum()
+            bb.tot_resp_toks = bb.resp_lens.sum()
         return bb
 
     def print(self):
