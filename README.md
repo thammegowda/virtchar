@@ -20,9 +20,9 @@ or [OpenNMT-Py](https://github.com/OpenNMT/OpenNMT-py) or
 Stick to this repository for hierarchical model.
 
 ### Some Suggestions:
-Retrieval based bot is easy to get to working and it is fun, so you should start there (see docs/retrieval-bot.md)
+Retrieval based bot is easy to get to working and it is fun, so you should start there (see [docs/retrieval-bot.md](docs/retrieval-bot.md))
 
-Hierarchical NLU based generator models have lots of issues, and requires lot of effort to get them to work.
+[Hierarchical NLU based generator models](docs/neural-generator-bot.md) have lots of issues, and requires lot of effort to get them to work.
 
 Specifically you will hit these issues:
 1. They need lots of data and time to train.
