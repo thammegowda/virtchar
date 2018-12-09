@@ -328,7 +328,10 @@ class RawDialogReader:
                 seq = raw_text.strip().split()
                 if self.add_eos and seq[-1] != EOS_TOK[0]:
                     seq.append(EOS_TOK[0])
-            seq = seq[:self.max_seq_len]
+            if len(seq) > self.max_seq_len:
+                seq = seq[:self.max_seq_len - 1]
+                seq.append(EOS_TOK_IDX if self.text_field else EOS_TOK[0])
+
             utter = Utterance(char, seq, raw_text=raw_text, raw_char=raw_char, uid=uid)
             dialog.append(utter)
         if len(dialog) > 0:
