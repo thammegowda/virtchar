@@ -208,6 +208,16 @@ def chat_console(model_path, enc_path, k=2, metric='L2', imitate=False, **args):
             print_state = True
 
 
+def decode(model_path, enc_path, inp, out, metric, imitate=False, k=1):
+    bot: ChatBot = ChatBot.load(model_path, enc_path)
+    for line in inp:
+        line = line.strip()
+        resps = (bot.response_to_response if imitate else bot.message_to_response)(
+            line, metric=metric, k=k)
+        score, resp = resps[0]
+        out.write(f'{resp}\t{score:g}\n')
+
+
 def main():
     par = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     par.add_argument('-ep', '--enc-path', required=True,
@@ -221,12 +231,25 @@ def main():
     prep_par.add_argument('-c', '--chats', help='Training chats: Message \\t Response',
                           default=sys.stdin)
 
-    chat_par = sub_par.add_parser('chat')
+    sub_par.add_parser('chat')
+    decode_par = sub_par.add_parser('decode')
+
+    decode_par.add_argument('-i', '--inp', default=sys.stdin,
+                            type=argparse.FileType('r', errors=None, encoding='utf-8'),
+                            help='Input file having one sentence per line.')
+    decode_par.add_argument('-o', '--out', default=sys.stdout,
+                            type=argparse.FileType('w', errors=None, encoding='utf-8'),
+                            help='Output file to write output.')
+    decode_par.add_argument('-m', '--metric', choices=['cosine', 'L2'], default='L2',
+                            help="Metric to find nearest neighbor")
+    decode_par.add_argument('-im', '--imitate', action='store_true',
+                            help='imitate')
 
     args = vars(par.parse_args())
     {
         'chat': chat_console,
-        'prep': prepare
+        'prep': prepare,
+        'decode': decode
     }[args.pop('cmd')](**args)
 
 
