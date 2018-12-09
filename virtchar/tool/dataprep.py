@@ -1,5 +1,5 @@
 import os
-from typing import List, Iterator, Tuple, Union, Optional
+from typing import Iterator, Tuple, Optional
 import torch
 from virtchar import log
 from virtchar import my_tensor as tensor, device

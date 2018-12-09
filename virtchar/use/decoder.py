@@ -8,7 +8,7 @@ import torch
 from torch import nn as nn
 
 from virtchar import DialogExperiment
-from virtchar import log, device, my_tensor as tensor, debug_mode
+from virtchar import log, device, debug_mode
 from virtchar.model.rnn import HRED
 from virtchar.tool.dataprep import PAD_TOK, BOS_TOK, EOS_TOK, \
     RawDialogReader, ChatRec, DialogMiniBatch, Dialog, Utterance
@@ -387,7 +387,7 @@ class Decoder:
         args['min_ctx'] = args.get('min_ctx', self.exp.min_ctx)
         args['max_ctx'] = args.get('max_ctx', self.exp.max_ctx)
         has_src_chars, has_tgt_chars = self.model.has_char_embs
-        assert has_src_chars == has_tgt_chars, 'both on or both off' # only this is supported
+        assert has_src_chars == has_tgt_chars, 'both on or both off'  # only this is supported
 
         has_chars = has_src_chars
         context = []
@@ -407,7 +407,6 @@ class Decoder:
             if print_state:
                 print_feedback('  '.join(f'{k}={v}' for k, v in args.items()))
                 print_state = False
-
 
             line = input('Input: ')
             line = line.strip()
@@ -468,7 +467,7 @@ class Decoder:
                         else:
                             assert ':' in line
                             parts = line.split(':')
-                            if not parts[1]: # empty text
+                            if not parts[1]:  # empty text
                                 tgt_char_name = parts[0]
                                 print_feedback(f"Character name changed to {tgt_char_name}")
                                 generate = len(context) >= args['min_ctx']
@@ -508,7 +507,8 @@ class Decoder:
                         for score, hyp in result:
                             print(f' >> {pref} {hyp}\t{score:.4f}')
                         print_feedback(f'took={1000 * (time.time()-start):.3f}ms')
-                        context.append((tgt_char_name if tgt_char_name else PAD_TOK[0], result[0][1]))
+                        context.append(
+                            (tgt_char_name if tgt_char_name else PAD_TOK[0], result[0][1]))
             except ReloadEvent as re:
                 raise re  # send it to caller
             except EOFError as e1:
@@ -517,28 +517,42 @@ class Decoder:
                 traceback.print_exc()
                 print_state = True
 
-    def decode_dialogs(self, dialogs: Iterator[Dialog], out, **args):
+    def decode_dialogs(self, dialogs: Iterator[Dialog], out, verbose=True, **args):
         min_ctx, max_ctx = self.exp.min_ctx, self.exp.max_ctx
         test_chars = None
         for i, dialog in enumerate(dialogs):
+            if out:
+                # write out the context
+                for utter in dialog.chat[:min_ctx]:
+                    line = "CTX\t"  # this is a context
+                    line += f"{utter.uid}\t" if utter.uid else ""
+                    line += f"{utter.raw_char}\t{utter.raw_text}\n"
+                    out.write(line)
+
             chats: Iterator[ChatRec] = dialog.as_test_chats(min_ctx=min_ctx, max_ctx=max_ctx,
                                                             test_chars=test_chars)
             for j, chat in enumerate(chats):
                 # One chat in batch. Should/can be improved later
                 batch = chat.as_dialog_mini_batch()
-                log.info(f"dialog: {i}: chat: {j} :: \n"
-                         f"MSG: {chat.context[-1].raw_char}: {chat.context[-1].raw_text}\n"
-                         f"RSP: {chat.response.raw_char}: {chat.response.raw_text}")
-
                 result = self.generate_chat(batch, **args)
-                num_hyp = args['num_hyp']
-                out_line = '\n'.join(f'{hyp}\t{score:.4f}' for score, hyp in result) + '\n'
-                log.info(f"OUT:\n{out_line}")
-                if out:
-                    out.write(out_line)
-                    if num_hyp > 1:
-                        out.write('\n')
 
-    def decode_file(self, inp, out, **args):
+                if verbose:
+                    log.info(f"dialog: {i}: chat: {j} :: \n"
+                             f"MSG: {chat.context[-1].raw_char}: {chat.context[-1].raw_text}\n"
+                             f"RSP: {chat.response.raw_char}: {chat.response.raw_text}")
+                    out_line = '\n'.join(f'{hyp}\t{score:.4f}' for score, hyp in result)
+                    log.info(f"OUT:\n{out_line} \n")
+                if out:
+                    resp = chat.response
+                    line = f"GEN\t"     # Generated
+                    line += f"{resp.uid}\t" if resp.uid else ""
+                    line += f"{resp.raw_char}\t{resp.raw_text}\t"  # Reference Text
+                    line += "\t".join([f"{hyp}\t{score:g}" for score, hyp in result])
+                    line += "\n"
+                    out.write(line)
+
+            out.write("\n")      # dialog seperator
+
+    def decode_file(self, inp, out, verbose=False, **args):
         reader = RawDialogReader(inp, text_field=self.text_vocab, char_field=self.char_vocab)
-        self.decode_dialogs(reader, out, **args)
+        self.decode_dialogs(reader, out, verbose=verbose, **args)
