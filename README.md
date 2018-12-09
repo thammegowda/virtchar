@@ -5,8 +5,8 @@ This repository has code to create chat bots by training them on TV transcripts.
 See `requirements.txt` for the required libraries and versions.
 
 There are two kinds of models:
-1. Retrieval based models: See docs/retrieval-bot.md
-2. Generator models: See docs/neural-generator-bot.md
+1. Retrieval based models: See [docs/retrieval-bot.md](docs/retrieval-bot.md)
+2. Generator models: See [docs/neural-generator-bot.md](docs/neural-generator-bot.md)
 
 
 A Retrieval bot uses [InferSent](https://github.com/facebookresearch/InferSent) model to
@@ -20,9 +20,9 @@ or [OpenNMT-Py](https://github.com/OpenNMT/OpenNMT-py) or
 Stick to this repository for hierarchical model.
 
 ### Some Suggestions:
-Retrieval based bot is easy to get to working and it is fun, so you should start there (see docs/retrieval-bot.md)
+Retrieval based bot is easy to get to working and it is fun, so you should start there (see [docs/retrieval-bot.md](docs/retrieval-bot.md))
 
-Hierarchical NLU based generator models have lots of issues, and requires lot of effort to get them to work.
+[Hierarchical NLU based generator models](docs/neural-generator-bot.md) have lots of issues, and requires lot of effort to get them to work.
 
 Specifically you will hit these issues:
 1. They need lots of data and time to train.
@@ -41,7 +41,7 @@ For now, this project uses a simple technique of down sampling the utterances(it
 
 ## Questions? Want to help/collaborate?
 - Short enquiries : [Sent them to me](https://twitter.com/thammegowda)
-- Long discussions: Create an issue or pull request on this repo
+- Long discussions and bugs: Create an issue or pull request on this repo
 
 
 
