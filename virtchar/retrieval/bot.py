@@ -220,19 +220,26 @@ def decode(model_path, enc_path, inp, out, metric, imitate=False, k=1):
 
 def main():
     par = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    par.add_argument('-ep', '--enc-path', required=True,
-                     help='path to SentenceEncoder state')
-    par.add_argument('-mp', '--model-path', required=True,
-                     help='path to the Bot model')
+
+    def _add_required_args(parser):
+        parser.add_argument('-ep', '--enc-path', required=True,
+                            help='path to SentenceEncoder state')
+        parser.add_argument('-mp', '--model-path', required=True,
+                            help='path to the Bot model')
 
     sub_par = par.add_subparsers(dest='cmd')
     sub_par.required = True
+
     prep_par = sub_par.add_parser('prep')
+    _add_required_args(prep_par)
     prep_par.add_argument('-c', '--chats', help='Training chats: Message \\t Response',
                           default=sys.stdin)
 
-    sub_par.add_parser('chat')
+    chat_par = sub_par.add_parser('chat')
+    _add_required_args(chat_par)
+
     decode_par = sub_par.add_parser('decode')
+    _add_required_args(decode_par)
 
     decode_par.add_argument('-i', '--inp', default=sys.stdin,
                             type=argparse.FileType('r', errors=None, encoding='utf-8'),
