@@ -1,3 +1,6 @@
 [submodule "InferSent"]
 	path = InferSent
 	url = https://github.com/facebookresearch/InferSent
+[submodule "data"]
+	path = data
+	url = https://github.com/thammegowda/dialog-data
